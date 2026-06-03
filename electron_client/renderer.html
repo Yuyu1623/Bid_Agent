@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dowell投标</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-logo"><span></span></div>
+          <div>
+            <p>Dowell投标</p>
+            <h1>投标工具箱</h1>
+          </div>
+        </div>
+
+        <button class="collapse-btn" type="button" aria-label="收起侧栏">‹</button>
+
+        <nav class="tool-nav">
+          <button class="tool-item active" type="button">
+            <span class="tool-icon">▣</span>
+            <span>
+              <strong>技术方案</strong>
+              <small>方案生成与正文编排</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button">
+            <span class="tool-icon">▤</span>
+            <span>
+              <strong>商务标</strong>
+              <small>商务响应与报价材料</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button">
+            <span class="tool-icon">▥</span>
+            <span>
+              <strong>知识库</strong>
+              <small>素材、模板和案例资产</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button">
+            <span class="tool-icon">≋</span>
+            <span>
+              <strong>标书查重</strong>
+              <small>相似度与重复表达检测</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button">
+            <span class="tool-icon">◇</span>
+            <span>
+              <strong>废标项检查</strong>
+              <small>硬性条款与响应完整性</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button">
+            <span class="tool-icon">◎</span>
+            <span>
+              <strong>投标机会</strong>
+              <small>机会发现与线索跟踪</small>
+            </span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button class="tool-item settings" type="button">
+            <span class="tool-icon">⚙</span>
+            <span>
+              <strong>设置</strong>
+              <small>模型与解析配置</small>
+            </span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <form id="uploadForm" class="step-card">
+          <div>
+            <p class="step-kicker">STEP 01</p>
+            <h2>上传招标文件</h2>
+            <p id="fileName" class="step-subtitle">当前解析方案：MinerU VLM</p>
+          </div>
+          <input
+            id="documentFile"
+            type="file"
+            accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.html"
+          />
+          <button id="chooseFileBtn" class="primary-btn" type="button">选择文件</button>
+
+          <div class="advanced-config">
+            <label>
+              后端地址
+              <input id="apiBase" type="text" value="http://127.0.0.1:8000" />
+            </label>
+            <label>
+              PDF / 文档解析方式
+              <select id="parseMethod">
+                <option value="mineru_vlm">MinerU VLM 模型</option>
+                <option value="mineru_pipeline">MinerU Pipeline 模型</option>
+                <option value="mineru_html">MinerU-HTML 模型</option>
+                <option value="pdfplumber">pdfplumber 本地 PDF</option>
+                <option value="docx2python">docx2python 本地 Word</option>
+              </select>
+            </label>
+            <label>
+              厂商
+              <select id="llmVendor">
+                <option value="siliconflow">硅基流动</option>
+              </select>
+            </label>
+            <label>
+              大模型
+              <select id="llmModel">
+                <option value="DeepSeek-V4-Pro">DeepSeek-V4-Pro</option>
+                <option value="Kimi-K2.6 (Pro)">Kimi-K2.6 (Pro)</option>
+                <option value="GLM-5.1 (Pro)">GLM-5.1 (Pro)</option>
+                <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+                <option value="GLM-4.7 (Pro)">GLM-4.7 (Pro)</option>
+                <option value="DeepSeek-R1 (Pro)">DeepSeek-R1 (Pro)</option>
+                <option value="Qwen3.6-35B-A3B">Qwen3.6-35B-A3B</option>
+              </select>
+            </label>
+            <label>
+              语言
+              <select id="language">
+                <option value="ch">中文</option>
+                <option value="en">英文</option>
+              </select>
+            </label>
+            <label>
+              页面范围
+              <input id="pageRanges" type="text" placeholder="例如：1-10,15-20，可留空" />
+            </label>
+            <label class="check-item" title="仅 MinerU 解析方式生效">
+              <input id="enableFormula" type="checkbox" checked />
+              公式识别
+            </label>
+            <label class="check-item" title="仅 MinerU 解析方式生效">
+              <input id="enableTable" type="checkbox" checked />
+              表格识别
+            </label>
+          </div>
+        </form>
+
+        <section class="content-card">
+          <header class="content-header">
+            <div>
+              <h2>招标文件内容</h2>
+              <p id="statusText">等待上传</p>
+            </div>
+            <div class="view-tabs">
+              <button class="tab active" type="button" data-tab="overview">概述</button>
+              <button class="tab" type="button" data-tab="scoring">技术要求</button>
+              <button class="tab" type="button" data-tab="qualification">资格/符合性</button>
+              <button class="tab" type="button" data-tab="price">报价细则</button>
+              <button class="tab" type="button" data-tab="sections">章节</button>
+              <button class="tab" type="button" data-tab="raw">JSON</button>
+            </div>
+          </header>
+
+          <div id="emptyState" class="empty-state">
+            <div class="empty-icon">⌁</div>
+            <h3>尚未导入招标文件</h3>
+            <p>当前步骤会先解析招标文件，再把解析后的 Markdown 内容连同提示词一起发送给 LLM 进行标书理解。</p>
+          </div>
+
+          <section id="overview" class="tab-panel active">
+            <div class="panel-title">
+              <h3>项目概述</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="overviewOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="overviewOutput" data-title="项目概述">展开</button>
+                <button class="ghost-btn" type="button" data-export="overviewOutput" data-name="项目概述.txt">导出</button>
+              </div>
+            </div>
+            <textarea id="overviewOutput" class="output" readonly>暂无结果</textarea>
+          </section>
+
+          <section id="scoring" class="tab-panel">
+            <div class="panel-title">
+              <h3>技术评分要求</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="scoringOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="scoringOutput" data-title="技术评分要求">展开</button>
+                <button class="ghost-btn" type="button" data-export="scoringOutput" data-name="技术评分要求.txt">导出</button>
+              </div>
+            </div>
+            <textarea id="scoringOutput" class="output" readonly>暂无结果</textarea>
+          </section>
+
+          <section id="qualification" class="tab-panel">
+            <div class="panel-title">
+              <h3>资格和符合性审查</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="qualificationOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="qualificationOutput" data-title="资格和符合性审查">展开</button>
+                <button class="ghost-btn" type="button" data-export="qualificationOutput" data-name="资格和符合性审查.txt">导出</button>
+              </div>
+            </div>
+            <textarea id="qualificationOutput" class="output" readonly>暂无结果</textarea>
+          </section>
+
+          <section id="price" class="tab-panel">
+            <div class="panel-title">
+              <h3>价格评分</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="priceOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="priceOutput" data-title="价格评分">展开</button>
+                <button class="ghost-btn" type="button" data-export="priceOutput" data-name="价格评分.txt">导出</button>
+              </div>
+            </div>
+            <textarea id="priceOutput" class="output" readonly>暂无结果</textarea>
+          </section>
+
+          <section id="sections" class="tab-panel">
+            <div class="panel-title">
+              <h3>解析章节</h3>
+              <div class="panel-actions">
+                <span id="sectionCount">0 个章节</span>
+                <button class="ghost-btn" type="button" data-expand="sectionsTextOutput" data-title="解析章节">展开</button>
+                <button class="ghost-btn" type="button" data-export="sectionsTextOutput" data-name="解析章节.txt">导出</button>
+              </div>
+            </div>
+            <div id="sectionList" class="section-list"></div>
+            <textarea id="sectionsTextOutput" class="sr-only" readonly></textarea>
+          </section>
+
+          <section id="raw" class="tab-panel">
+            <div class="panel-title">
+              <h3>接口返回</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="rawOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="rawOutput" data-title="接口返回">展开</button>
+                <button class="ghost-btn" type="button" data-export="rawOutput" data-name="接口返回.json">导出</button>
+              </div>
+            </div>
+            <textarea id="rawOutput" class="output" readonly>暂无结果</textarea>
+          </section>
+
+          <div class="step-actions">
+            <button id="resetBtn" class="text-danger" type="button">重置</button>
+            <button class="home-btn" type="button">首页</button>
+            <button class="prev-btn" type="button" disabled>上一步</button>
+            <button id="submitBtn" class="next-btn" type="submit" form="uploadForm">下一步</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="viewerModal" class="viewer-modal" aria-hidden="true">
+      <div class="viewer-backdrop" data-close-viewer></div>
+      <section class="viewer-dialog">
+        <header>
+          <h2 id="viewerTitle">内容查看</h2>
+          <div class="viewer-actions">
+            <button id="viewerCopyBtn" class="ghost-btn" type="button">复制</button>
+            <button class="ghost-btn" type="button" data-close-viewer>关闭</button>
+          </div>
+        </header>
+        <textarea id="viewerText" class="viewer-text" readonly></textarea>
+      </section>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
