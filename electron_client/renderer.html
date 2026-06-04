@@ -23,8 +23,8 @@
           <button class="tool-item active" type="button">
             <span class="tool-icon">▣</span>
             <span>
-              <strong>技术方案</strong>
-              <small>方案生成与正文编排</small>
+              <strong>招标解析</strong>
+              <small>标书生成</small>
             </span>
           </button>
           <button class="tool-item" type="button">
@@ -35,7 +35,7 @@
             </span>
           </button>
           <button class="tool-item" type="button">
-            <span class="tool-icon">▥</span>
+            <span class="tool-icon">▦</span>
             <span>
               <strong>知识库</strong>
               <small>素材、模板和案例资产</small>
@@ -49,17 +49,10 @@
             </span>
           </button>
           <button class="tool-item" type="button">
-            <span class="tool-icon">◇</span>
+            <span class="tool-icon">◼</span>
             <span>
               <strong>废标项检查</strong>
               <small>硬性条款与响应完整性</small>
-            </span>
-          </button>
-          <button class="tool-item" type="button">
-            <span class="tool-icon">◎</span>
-            <span>
-              <strong>投标机会</strong>
-              <small>机会发现与线索跟踪</small>
             </span>
           </button>
         </nav>
@@ -78,9 +71,9 @@
       <main class="workspace">
         <form id="uploadForm" class="step-card">
           <div>
-            <p class="step-kicker">STEP 01</p>
-            <h2>上传招标文件</h2>
-            <p id="fileName" class="step-subtitle">当前解析方案：MinerU VLM</p>
+            <p id="stepKicker" class="step-kicker">STEP 01</p>
+            <h2 id="stepTitle">上传招标文件</h2>
+            <p id="fileName" class="step-subtitle">当前解析方案：MinerU VLM 模型</p>
           </div>
           <input
             id="documentFile"
@@ -88,6 +81,14 @@
             accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.html"
           />
           <button id="chooseFileBtn" class="primary-btn" type="button">选择文件</button>
+
+          <div class="flow-steps" aria-label="投标流程">
+            <span class="flow-step active" data-flow-step="1">上传</span>
+            <span class="flow-line"></span>
+            <span class="flow-step" data-flow-step="2">核对</span>
+            <span class="flow-line"></span>
+            <span class="flow-step" data-flow-step="3">生成</span>
+          </div>
 
           <div class="advanced-config">
             <label>
@@ -123,6 +124,13 @@
               </select>
             </label>
             <label>
+              输出方式
+              <select id="streamOutput">
+                <option value="true">流式输出</option>
+                <option value="false">非流式输出</option>
+              </select>
+            </label>
+            <label>
               语言
               <select id="language">
                 <option value="ch">中文</option>
@@ -144,6 +152,32 @@
           </div>
         </form>
 
+        <section id="generationTopPanel" class="generation-top-panel">
+          <div class="generation-card primary">
+            <p>STEP 03</p>
+            <h3>标书生成工作台</h3>
+            <span>招标文件核对完成后，将基于核对后的内容生成技术方案、商务响应、偏离表、检查清单等材料。</span>
+          </div>
+          <div class="generation-grid">
+            <section>
+              <strong>技术方案生成</strong>
+              <span>根据技术要求、评分项和项目概述生成正文结构。</span>
+            </section>
+            <section>
+              <strong>商务响应生成</strong>
+              <span>整理资格、符合性、商务评分和响应材料。</span>
+            </section>
+            <section>
+              <strong>废标项检查</strong>
+              <span>根据核对后的条款建立硬性要求检查清单。</span>
+            </section>
+            <section>
+              <strong>终稿组装</strong>
+              <span>预留 Word / PDF 导出与模板套版入口。</span>
+            </section>
+          </div>
+        </section>
+
         <section class="content-card">
           <header class="content-header">
             <div>
@@ -151,98 +185,102 @@
               <p id="statusText">等待上传</p>
             </div>
             <div class="view-tabs">
-              <button class="tab active" type="button" data-tab="overview">概述</button>
-              <button class="tab" type="button" data-tab="scoring">技术要求</button>
-              <button class="tab" type="button" data-tab="qualification">资格/符合性</button>
-              <button class="tab" type="button" data-tab="price">报价细则</button>
-              <button class="tab" type="button" data-tab="sections">章节</button>
-              <button class="tab" type="button" data-tab="raw">JSON</button>
+              <button class="tab active" type="button" data-tab="notice">投标人须知</button>
+              <button class="tab" type="button" data-tab="business">商务内容</button>
+              <button class="tab" type="button" data-tab="technical">技术要求</button>
+              <button class="tab" type="button" data-tab="qualification">资格审查</button>
+              <button class="tab" type="button" data-tab="scoring">评分要求</button>
+              <button class="tab" type="button" data-tab="parsed">解析原文</button>
             </div>
           </header>
 
           <div id="emptyState" class="empty-state">
             <div class="empty-icon">⌁</div>
             <h3>尚未导入招标文件</h3>
-            <p>当前步骤会先解析招标文件，再把解析后的 Markdown 内容连同提示词一起发送给 LLM 进行标书理解。</p>
+            <p>上传文件后，系统会解析文档并按五大部分整理为可编辑内容。</p>
           </div>
 
-          <section id="overview" class="tab-panel active">
+          <section id="notice" class="tab-panel active">
             <div class="panel-title">
-              <h3>项目概述</h3>
+              <h3>投标人须知</h3>
               <div class="panel-actions">
-                <button class="ghost-btn" type="button" data-copy="overviewOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="overviewOutput" data-title="项目概述">展开</button>
-                <button class="ghost-btn" type="button" data-export="overviewOutput" data-name="项目概述.txt">导出</button>
+                <button class="ghost-btn" type="button" data-copy="noticeFields">复制</button>
+                <button class="ghost-btn" type="button" data-expand="noticeFields" data-title="投标人须知">展开</button>
               </div>
             </div>
-            <textarea id="overviewOutput" class="output" readonly>暂无结果</textarea>
+            <div id="noticeFields" class="form-grid output-area"></div>
           </section>
 
-          <section id="scoring" class="tab-panel">
+          <section id="business" class="tab-panel">
             <div class="panel-title">
-              <h3>技术评分要求</h3>
+              <h3>商务内容</h3>
               <div class="panel-actions">
-                <button class="ghost-btn" type="button" data-copy="scoringOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="scoringOutput" data-title="技术评分要求">展开</button>
-                <button class="ghost-btn" type="button" data-export="scoringOutput" data-name="技术评分要求.txt">导出</button>
+                <button class="ghost-btn" type="button" data-copy="businessOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="businessOutput" data-title="商务内容">展开</button>
+                <button class="ghost-btn" type="button" data-export="businessOutput" data-name="商务内容.txt">导出</button>
               </div>
             </div>
-            <textarea id="scoringOutput" class="output" readonly>暂无结果</textarea>
+            <textarea id="businessOutput" class="output" readonly placeholder="该部分 Prompt 暂未编写，暂不输出结构化内容。"></textarea>
+          </section>
+
+          <section id="technical" class="tab-panel">
+            <div class="panel-title">
+              <h3>技术要求</h3>
+              <div class="panel-actions">
+                <button class="ghost-btn" type="button" data-copy="technicalOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="technicalOutput" data-title="技术要求">展开</button>
+                <button class="ghost-btn" type="button" data-export="technicalOutput" data-name="技术要求.txt">导出</button>
+              </div>
+            </div>
+            <textarea id="technicalOutput" class="output" readonly>暂无结果</textarea>
           </section>
 
           <section id="qualification" class="tab-panel">
             <div class="panel-title">
-              <h3>资格和符合性审查</h3>
+              <h3>资格审查</h3>
               <div class="panel-actions">
-                <button class="ghost-btn" type="button" data-copy="qualificationOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="qualificationOutput" data-title="资格和符合性审查">展开</button>
-                <button class="ghost-btn" type="button" data-export="qualificationOutput" data-name="资格和符合性审查.txt">导出</button>
+                <button class="ghost-btn" type="button" data-copy="qualificationTables">复制</button>
+                <button class="ghost-btn" type="button" data-expand="qualificationTables" data-title="资格审查">展开</button>
               </div>
             </div>
-            <textarea id="qualificationOutput" class="output" readonly>暂无结果</textarea>
+            <div class="output-area module-view">
+              <div class="sub-tabs" data-module-tabs="qualificationTables"></div>
+              <div id="qualificationTables"></div>
+            </div>
           </section>
 
-          <section id="price" class="tab-panel">
+          <section id="scoring" class="tab-panel">
             <div class="panel-title">
-              <h3>价格评分</h3>
+              <h3>评分要求</h3>
               <div class="panel-actions">
-                <button class="ghost-btn" type="button" data-copy="priceOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="priceOutput" data-title="价格评分">展开</button>
-                <button class="ghost-btn" type="button" data-export="priceOutput" data-name="价格评分.txt">导出</button>
+                <button class="ghost-btn" type="button" data-copy="scoringTables">复制</button>
+                <button class="ghost-btn" type="button" data-expand="scoringTables" data-title="评分要求">展开</button>
               </div>
             </div>
-            <textarea id="priceOutput" class="output" readonly>暂无结果</textarea>
+            <div class="output-area module-view">
+              <div class="sub-tabs" data-module-tabs="scoringTables"></div>
+              <div id="scoringTables"></div>
+            </div>
           </section>
 
-          <section id="sections" class="tab-panel">
+          <section id="parsed" class="tab-panel">
             <div class="panel-title">
-              <h3>解析章节</h3>
+              <h3>解析后的招标内容</h3>
               <div class="panel-actions">
-                <span id="sectionCount">0 个章节</span>
-                <button class="ghost-btn" type="button" data-expand="sectionsTextOutput" data-title="解析章节">展开</button>
-                <button class="ghost-btn" type="button" data-export="sectionsTextOutput" data-name="解析章节.txt">导出</button>
+                <button id="reanalyzeEditedBtn" class="ghost-btn" type="button">用修改内容重新分析</button>
+                <button class="ghost-btn" type="button" data-copy="parsedMarkdownOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="parsedMarkdownOutput" data-title="解析后的招标内容">展开</button>
+                <button class="ghost-btn" type="button" data-export="parsedMarkdownOutput" data-name="解析后的招标内容.md">导出</button>
               </div>
             </div>
-            <div id="sectionList" class="section-list"></div>
-            <textarea id="sectionsTextOutput" class="sr-only" readonly></textarea>
-          </section>
-
-          <section id="raw" class="tab-panel">
-            <div class="panel-title">
-              <h3>接口返回</h3>
-              <div class="panel-actions">
-                <button class="ghost-btn" type="button" data-copy="rawOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="rawOutput" data-title="接口返回">展开</button>
-                <button class="ghost-btn" type="button" data-export="rawOutput" data-name="接口返回.json">导出</button>
-              </div>
-            </div>
-            <textarea id="rawOutput" class="output" readonly>暂无结果</textarea>
+            <textarea id="parsedMarkdownOutput" class="output editable-output" placeholder="文件解析完成后，解析出的 Markdown 会显示在这里，可直接修改后重新分析。"></textarea>
           </section>
 
           <div class="step-actions">
             <button id="resetBtn" class="text-danger" type="button">重置</button>
             <button class="home-btn" type="button">首页</button>
             <button class="prev-btn" type="button" disabled>上一步</button>
+            <button id="reviewDoneBtn" class="next-btn review-btn" type="button">核对完成</button>
             <button id="submitBtn" class="next-btn" type="submit" form="uploadForm">下一步</button>
           </div>
         </section>

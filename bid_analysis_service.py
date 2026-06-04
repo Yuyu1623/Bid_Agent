@@ -5,10 +5,10 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from bid_analysis_prompts import (
-    extract_price_scoring_requirements_from_sections,
-    extract_project_overview_from_sections,
-    extract_qualification_compliance_requirements_from_sections,
-    extract_technical_scoring_requirements_from_sections,
+    build_price_scoring_messages_from_sections,
+    build_project_overview_messages_from_sections,
+    build_qualification_compliance_messages_from_sections,
+    build_technical_scoring_messages_from_sections,
 )
 from bid_document_parser import BidDocumentSection, parse_bid_document
 from llm_client import LLM_Invoke
@@ -43,6 +43,7 @@ def analyze_bid_document(
     parse_method: str = "mineru_vlm",
     llm_vendor: str = "siliconflow",
     llm_model: Optional[str] = None,
+    stream_output: bool = True,
     llm_client: Optional[LLM_Invoke] = None,
 ) -> BidAnalysisResult:
     """Parse a bid document, pack parsed content with prompts, then ask the LLM."""
@@ -68,21 +69,27 @@ def analyze_bid_document(
         )
     llm = llm_client or LLM_Invoke(model=resolved_model, base_url=resolved_base_url)
 
-    project_overview = extract_project_overview_from_sections(sections, llm)
-    technical_scoring_requirements = extract_technical_scoring_requirements_from_sections(
-        sections,
-        llm,
-    )
-    qualification_compliance_requirements = (
-        extract_qualification_compliance_requirements_from_sections(
-            sections,
-            llm,
+    messages_batch = [
+        build_project_overview_messages_from_sections(sections),
+        build_technical_scoring_messages_from_sections(sections),
+        build_qualification_compliance_messages_from_sections(sections),
+        build_price_scoring_messages_from_sections(sections),
+    ]
+    try:
+        (
+            project_overview,
+            technical_scoring_requirements,
+            qualification_compliance_requirements,
+            price_scoring_requirements,
+        ) = llm.think_many_sync(messages_batch, stream=stream_output)
+    except Exception:
+        project_overview = llm.think(messages_batch[0], stream=stream_output)
+        technical_scoring_requirements = llm.think(messages_batch[1], stream=stream_output)
+        qualification_compliance_requirements = llm.think(
+            messages_batch[2],
+            stream=stream_output,
         )
-    )
-    price_scoring_requirements = extract_price_scoring_requirements_from_sections(
-        sections,
-        llm,
-    )
+        price_scoring_requirements = llm.think(messages_batch[3], stream=stream_output)
 
     return BidAnalysisResult(
         sections=sections,
