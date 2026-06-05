@@ -3,6 +3,7 @@
 !.env.example
 
 .venv/
+.mineru-venv/
 venv/
 env/
 __pycache__/

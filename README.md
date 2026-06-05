@@ -1,48 +1,71 @@
 # Dowell 投标工具箱
 
-这是一个面向招标文件解析、核对和标书生成的本地工具。项目包含 Python FastAPI 后端和 Electron 桌面前端，可以解析 PDF、Word 等招标文件，调用大模型提取项目概述、技术要求、资格/符合性审查、评分要求，并支持人工修改解析后的原文后重新分析。
+Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成的本地桌面工具。项目由 Python FastAPI 后端和 Electron 桌面前端组成，支持解析 PDF、Word、图片、HTML 等招标文件，并调用大模型提取投标人须知、商务内容、技术要求、资格审查和评分要求。
 
-`.env` 中的密钥和本地配置不要提交到仓库，请使用 `.env.example` 作为配置模板。
+本仓库会持续更新。`.env` 中的 API Key、Token、本地路径等个人配置不要提交到 GitHub，请使用 `.env.example` 作为配置模板。
+
+## 当前技术路径
+
+```text
+招标文件
+  -> Electron 桌面端上传
+  -> FastAPI 后端接收
+  -> 解析策略选择
+      -> MinerU API / MinerU 本地 Pipeline
+      -> pdfplumber 本地 PDF 解析
+      -> docx2python / python-docx Word 解析
+      -> DOCX 图片 OCR 补充
+  -> Markdown / 章节结构化
+  -> 大模型并发分析
+      -> 投标人须知
+      -> 技术要求
+      -> 资格审查
+      -> 评分要求
+  -> Electron 前端五大模块展示
+```
 
 ## 功能概览
 
 - 支持上传 PDF、Word、图片、HTML 等招标文件
-- 支持 MinerU VLM、MinerU Pipeline、MinerU-HTML 模型解析
-- 支持 `pdfplumber`、`docx2python` 本地解析方式
-- 支持解析后的 Markdown 原文展示、编辑、复制、展开和导出
-- 支持用人工修改后的解析内容重新调用大模型分析
+- 支持自动解析策略推荐，也支持手动选择解析方式
+- 支持 MinerU VLM、MinerU Pipeline、MinerU-HTML
+- 支持本地 MinerU Pipeline
+- 支持 `pdfplumber` 本地 PDF 解析
+- 支持 `docx2python`、`python-docx` Word 解析
+- 支持 DOCX 图片 OCR，使用 RapidOCR / Tesseract 作为本地补充
 - 支持大模型流式输出和非流式输出
-- 大模型分析默认并行处理，失败后自动降级为串行处理
-- 支持三步前端流程：上传招标文件、招标文件分析核对、标书生成
-- 提供 FastAPI 后端接口和 Electron 桌面客户端
-
-## 当前流程
-
-1. 上传招标文件
-   前端上传文件到后端，后端调用 MinerU 或本地解析器解析文件，并调用大模型提取结构化信息。
-
-2. 招标文件分析核对
-   前端显示大模型分析结果，同时在“解析原文”页签展示解析后的 Markdown。用户可以直接修改解析原文，并点击“用修改内容重新分析”。
-
-3. 标书生成
-   点击“核对完成”后进入标书生成步骤。目前这一步先做了上方工作台样式，占位模块包括技术方案生成、商务响应生成、废标项检查和终稿组装。
+- 支持四个大模型分析任务并发执行
+- 支持修改解析后的内容并重新分析
+- 前端按五大模块展示：投标人须知、商务内容、技术要求、资格审查、评分要求
+- 资格审查支持资格性审查、符合性审查、废标项切换查看
+- 评分要求支持商务评分、技术评分切换查看
 
 ## 项目结构
 
 ```text
 .
-├── bid_parser_api.py          # FastAPI 后端接口
-├── bid_document_parser.py     # 招标文件解析和章节拆分
-├── bid_analysis_service.py    # 招标文件分析服务
-├── bid_analysis_prompts.py    # 大模型分析提示词
-├── llm_client.py              # 大模型调用封装，支持同步、异步和流式
-├── llm_model_config.py        # 前端模型名称和真实模型 ID 映射
-├── MinerU_pdf_parse_tool.py   # MinerU 文件解析工具
+├── bid_parser_api.py          # FastAPI 后端接口，包括上传、解析、分析和流式接口
+├── bid_analysis_service.py    # 招标文件分析服务，负责解析后并发调用大模型
+├── bid_analysis_prompts.py    # 大模型分析 Prompt
+├── bid_document_parser.py     # 招标文件解析入口和章节拆分
+├── bid_parse_strategy.py      # 解析方式推荐和解析质量报告
+├── bid_image_analysis.py      # 文档图片分析和 OCR 辅助能力
+├── MinerU_pdf_parse_tool.py   # MinerU API 文档解析工具
+├── llm_client.py              # OpenAI-compatible 大模型客户端，支持同步、异步、流式
+├── llm_model_config.py        # 前端模型名称与真实模型 ID 映射
 ├── SerpApi_search_tool.py     # SerpApi 搜索工具
-├── plan_and_solve_agent.py    # Plan-and-Solve 智能体逻辑
+├── plan_and_solve_agent.py    # Plan-and-Solve Agent 逻辑
 ├── run_plan_and_solve.py      # 命令行入口
 ├── requirements.txt           # Python 依赖
+├── MINERU_LOCAL_DEPLOY.md     # MinerU 本地部署说明
 └── electron_client/           # Electron 桌面客户端
+    ├── main.js
+    ├── preload.js
+    ├── renderer.html
+    ├── renderer.js
+    ├── styles.css
+    ├── package.json
+    └── package-lock.json
 ```
 
 ## 环境要求
@@ -51,9 +74,11 @@
 - Node.js 18 或更高版本
 - npm
 - 可用的大模型 API Key
-- 如使用 MinerU 解析，需要 MinerU API Token
+- 如使用 MinerU API，需要 MinerU API Token
+- 如使用本地 MinerU Pipeline，需要本机可运行 MinerU CLI
+- 如使用 Tesseract OCR，需要本机安装 Tesseract
 
-## 安装依赖
+## 安装 Python 依赖
 
 建议使用虚拟环境：
 
@@ -63,24 +88,40 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-安装 Electron 客户端依赖：
+Python 依赖包括：
+
+- `fastapi`、`uvicorn`：后端 API 服务
+- `openai`：OpenAI-compatible 大模型调用
+- `python-dotenv`：读取本地环境变量
+- `pdfplumber`：本地 PDF 文本解析
+- `docx2python`、`python-docx`：Word 文档解析
+- `pillow`、`opencv-python`、`rapidocr-onnxruntime`、`pytesseract`：图片和 OCR 辅助解析
+- `requests`、`pydantic`、`python-multipart`：接口、校验和上传支持
+
+## 安装 Electron 客户端依赖
 
 ```powershell
 cd electron_client
 npm install
 ```
 
+Electron 客户端主要依赖：
+
+- `electron`
+- `electron-builder`
+
 ## 配置环境变量
 
-复制配置模板：
+复制模板：
 
 ```powershell
 copy .env.example .env
 ```
 
-编辑 `.env`，填写自己的密钥和模型信息：
+编辑 `.env`，填入自己的密钥和模型信息：
 
 ```env
+LLM_MODEL_DISPLAY_NAME=
 LLM_MODEL_ID=your-model-id
 LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
@@ -93,14 +134,13 @@ MINERU_REQUEST_TIMEOUT=60
 SERPAPI_API_KEY=your-serpapi-key
 ```
 
-当前前端模型下拉框展示的是易读名称，后端会通过 `llm_model_config.py` 映射为供应商官方模型 ID。当前供应商只配置了硅基流动。
+注意：`.env` 已加入 `.gitignore`，不要提交真实密钥。
 
 ## 启动后端
 
-必须在项目根目录启动后端：
+在项目根目录启动 FastAPI：
 
 ```powershell
-cd C:\Users\Dowell\Desktop\plan_and_solve_agent
 python -m uvicorn bid_parser_api:app --host 127.0.0.1 --port 8000
 ```
 
@@ -110,19 +150,26 @@ python -m uvicorn bid_parser_api:app --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000/health
 ```
 
-正常返回：
-
-```json
-{"status":"ok"}
-```
-
 接口文档：
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-如果提示端口占用，说明 8000 已经有后端在运行，可以直接使用，或换端口启动。前端填写的后端地址必须和 FastAPI 启动端口一致。
+## 启动前端
+
+```powershell
+cd electron_client
+npm start
+```
+
+前端默认连接：
+
+```text
+http://127.0.0.1:8000
+```
+
+如果后端端口发生变化，请在前端“后端地址”中同步修改。
 
 ## 常用接口
 
@@ -130,117 +177,154 @@ http://127.0.0.1:8000/docs
   后端健康检查。
 
 - `POST /bid-documents/parse`
-  根据本地路径或远程 URL 解析文件。
+  根据本地路径或远程 URL 解析招标文件。
 
 - `POST /bid-documents/upload`
-  上传文件并解析，返回章节列表。
+  上传文件并解析，返回章节和解析质量信息。
+
+- `POST /bid-documents/analyze`
+  根据本地路径或远程 URL 解析并调用大模型分析。
 
 - `POST /bid-documents/upload-analyze`
-  上传文件，解析后调用大模型，非流式一次性返回结果。
+  上传文件，解析后调用大模型分析，返回完整 JSON。
 
 - `POST /bid-documents/upload-analyze-stream`
-  上传文件，解析后调用大模型，前端可流式接收结果。
+  上传文件，解析后以 Server-Sent Events 流式返回分析过程和结果。
 
 - `POST /bid-documents/analyze-content`
-  使用人工修改后的解析内容重新分析，非流式返回。
+  使用人工修改后的解析内容重新分析。
 
 - `POST /bid-documents/analyze-content-stream`
-  使用人工修改后的解析内容重新分析，流式返回。
+  使用人工修改后的解析内容流式重新分析。
 
-## 大模型并行策略
+## 解析方式
 
-当前分析模块包括：
+当前支持的解析方式包括：
 
-- 项目概述
+```text
+auto                  自动推荐解析方式
+mineru_vlm            MinerU VLM
+mineru_pipeline       MinerU Pipeline
+mineru_html           MinerU-HTML
+mineru_local_pipeline 本地 MinerU Pipeline
+pdfplumber            本地 PDF 文本解析
+docx2python           本地 Word 文本解析
+docx2python_image_ocr Word 文本解析 + 图片 OCR
+```
+
+`auto` 会根据文件类型、文本量、DOCX 图片数量等因素推荐解析方式。
+
+## 大模型分析策略
+
+后端会将解析后的文档内容组装为 Markdown，然后并发执行四个大模型分析任务：
+
+- 投标人须知 / 项目概览
 - 技术要求
-- 资格和符合性审查
+- 资格审查
 - 评分要求
 
-无论前端选择流式还是非流式，后端都会优先并行请求这四个大模型任务。如果并行失败，会自动降级为串行请求，尽量保证任务可以继续完成。
+前端可以选择：
 
-流式输出时，前端会边接收边更新对应模块内容；非流式输出时，前端会等待全部完成后一次性展示结果。
+- 流式输出
+- 非流式输出
 
-## 启动前端
+流式接口会边分析边返回事件；非流式接口会等待全部分析完成后一次性返回结果。
 
-项目开发阶段建议先用源码启动 Electron，不急着打包 exe：
+## MinerU 本地部署
 
-```powershell
-cd C:\Users\Dowell\Desktop\plan_and_solve_agent\electron_client
-npm start
-```
-
-前端默认后端地址是：
+项目支持本地 MinerU Pipeline。详细安装和配置见：
 
 ```text
-http://127.0.0.1:8000
+MINERU_LOCAL_DEPLOY.md
 ```
 
-如果后端换了端口，比如 `8010`，前端也要改为：
+如果后端找不到 `mineru` 命令，可以在 `.env` 中配置本地命令路径：
 
-```text
-http://127.0.0.1:8010
+```env
+MINERU_LOCAL_COMMAND=C:\path\to\mineru.exe
 ```
 
-## 打包 exe
+本地路径属于个人配置，不要提交到 GitHub。
 
-项目结束或阶段稳定后再打包：
+## 打包桌面端
+
+项目稳定后可以打包 Windows 便携版：
 
 ```powershell
 cd electron_client
 npm run dist
 ```
 
-打包产物会输出到：
+打包产物输出到：
 
 ```text
 electron_client/dist/
 ```
 
-注意：修改源码后，旧 exe 不会自动更新，必须重新打包才会包含最新界面和逻辑。
+`electron_client/dist/` 已加入 `.gitignore`，不要提交打包产物。
 
-## 排查处理失败
+## 不要提交的内容
 
-如果前端提示无法连接后端，先检查：
+以下内容不应上传到 GitHub：
 
 ```text
-http://127.0.0.1:8000/health
+.env
+.venv/
+.mineru-venv/
+electron_client/node_modules/
+electron_client/dist/
+__pycache__/
+*.pyc
+logs/
+outputs/
+uploads/
+temp/
+tmp/
 ```
 
-如果不通，启动后端：
+## 更新到 GitHub
 
-```powershell
-cd C:\Users\Dowell\Desktop\plan_and_solve_agent
-python -m uvicorn bid_parser_api:app --host 127.0.0.1 --port 8000
+提交前先检查敏感文件是否被跟踪：
+
+```bash
+git status --short
+git ls-files .env
+git ls-files .venv .mineru-venv electron_client/node_modules electron_client/dist __pycache__
 ```
 
-如果 `/health` 正常但解析失败：
+如果 `git ls-files .env` 有输出，先从 Git 索引移除，但保留本地文件：
 
-- 检查 `.env` 中的 `MINERU_API_TOKEN`
-- 检查网络和代理是否能访问 MinerU
-- 检查文件格式是否支持
-- 使用较小页面范围测试大文件，例如 `1-5`
+```bash
+git rm --cached .env
+```
 
-如果大模型失败：
+如果虚拟环境、依赖目录、构建产物或缓存目录被跟踪，执行：
 
-- 检查 `LLM_API_KEY`
-- 检查 `LLM_BASE_URL`
-- 检查 `LLM_MODEL_ID` 或前端模型映射
-- 检查网络和代理
+```bash
+git rm -r --cached .venv
+git rm -r --cached .mineru-venv
+git rm -r --cached electron_client/node_modules
+git rm -r --cached electron_client/dist
+git rm -r --cached __pycache__
+```
 
-## 不建议提交的内容
+如果某条命令提示路径不存在或没有被跟踪，可以忽略。
 
-- `.env`
-- `.venv/`
-- `electron_client/node_modules/`
-- `electron_client/dist/`
-- `__pycache__/`
-- 临时输出文件和日志
+确认没有敏感文件后提交：
+
+```bash
+git add .
+git status --short
+git commit -m "Update project documentation and technical path"
+git push origin master
+```
+
+如果之前已经把 `.env` 或密钥推送到 GitHub，建议立即更换相关 API Key 和 Token。
 
 ## 后续计划
 
-- 接入正式的 Step 3 标书生成逻辑
+- 完善标书生成模块
 - 增加 Word / PDF 导出能力
 - 增加模板套版能力
 - 增加废标项检查和响应完整性检查
-- 增加更多本地解析方式
 - 增加自动化测试和发布流程
