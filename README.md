@@ -2,7 +2,53 @@
 
 Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成的本地桌面工具。项目由 Python FastAPI 后端和 Electron 桌面前端组成，支持解析 PDF、Word、图片、HTML 等招标文件，并调用大模型提取投标人须知、商务内容、技术要求、资格审查和评分要求。
 
-本仓库会持续更新。`.env` 中的 API Key、Token、本地路径等个人配置不要提交到 GitHub，请使用 `.env.example` 作为配置模板。
+本仓库会持续更新。`.env` 中的 API Key、Token、本地路径等个人配置不公开，请使用 `.env.example` 作为配置模板。
+
+## 招投标智能体能力设计
+
+项目整体按六层能力建设，目标是从“文件读懂”逐步扩展到“投标生成、审查和辅助决策”：
+
+```text
+1. 文件解析层 `[已完成基础版，持续增强中]`
+   -> 读懂招标文件、投标文件、合同、附件
+   -> 支持 PDF、Word、图片、HTML 等格式
+   -> 识别原生文本、扫描件、图文混排、表格、图片和页段结构
+
+2. 结构化抽取层 `[已完成基础版，持续增强中]`
+   -> 抽取资格条件：资格审查、符合性审查、废标项
+   -> 抽取评分点：商务评分、技术评分、评分标准、分值
+   -> 抽取技术参数：技术要求、服务要求、功能参数、验收标准
+   -> 抽取交付要求：商务内容、合同条款、付款方式、交付周期、售后维保
+
+3. 知识沉淀层 `[规划中]`
+   -> 建立项目表，沉淀项目名称、编号、预算、招标人、代理机构、时间节点
+   -> 建立规则库，沉淀资格规则、评分规则、废标规则、响应规则
+   -> 建立案例库，沉淀历史项目、相似项目、投标经验和常见风险
+   -> 建立条款库，沉淀合同条款、商务条款、技术条款、审查条款
+   -> 建立方案素材库，沉淀商务标、技术标、服务方案、响应材料模板
+
+4. 生成层 `[规划中，已预留标书生成入口]`
+   -> 生成招标文件
+   -> 生成商务标、技术标、响应表、偏离表
+   -> 生成审查报告、风险报告、投标决策建议
+
+5. 审查层 `[部分完成]`
+   -> 检查合规性、完整性、一致性
+   -> 检查响应偏离、漏项、矛盾项和废标风险
+   -> 使用正则、宽关键词回查、原文证据片段和提取结果溯源辅助核验
+   -> 可选择支持深度思考的模型追加大模型复核意见
+
+6. 辅助决策层 `[规划中]`
+   -> 判断是否投标
+   -> 评估风险大小、胜率高低
+   -> 辅助制定报价策略、响应策略和投标优先级
+```
+
+当前完成度说明：
+
+- `已完成基础版`：已有可用功能链路，后续主要做稳定性、速度和准确率增强。
+- `部分完成`：已有入口或核心能力，但还没有覆盖完整业务闭环。
+- `规划中`：README 中明确为后续建设方向，当前尚未形成完整功能。
 
 ## 当前技术路径
 
@@ -10,35 +56,61 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 招标文件
   -> Electron 桌面端上传
   -> FastAPI 后端接收
-  -> 解析策略选择
-      -> MinerU API / MinerU 本地 Pipeline
-      -> pdfplumber 本地 PDF 解析
-      -> docx2python / python-docx Word 解析
-      -> DOCX 图片 OCR 补充
-  -> Markdown / 章节结构化
-  -> 大模型并发分析
+  -> 智能解析两层处理
+      -> 第一层：解析层
+          -> 判断 PDF 类型：原生文本 PDF / 扫描件 PDF / 图文混排 PDF
+          -> 原生文本 PDF：pdfplumber 稳定文本抽取
+          -> 原生复杂 PDF：可手动选择 PyMuPDF4LLM / Docling 试验增强解析
+          -> 扫描件 PDF：OCR / MinerU VLM
+          -> 图文混排 PDF：MinerU 多模态 / MinerU 并行页段
+          -> Word：docx2python / python-docx / 图片 OCR
+      -> 第二层：结构还原层
+          -> 尽量保留页码、标题层级、章节、段落、表格、图片说明、页眉页脚线索
+  -> Markdown / 页段 / 章节结构化
+  -> 宽关键词检索候选片段
+  -> 大模型五路并发分析
       -> 投标人须知
+      -> 商务内容
       -> 技术要求
       -> 资格审查
       -> 评分要求
-  -> Electron 前端五大模块展示
+  -> 正则与关键词辅助校验 / 评分上下文筛选
+  -> 内容审查智能体
+      -> 正则检查各模块关键字段覆盖率
+      -> 区分“原文存在但提取缺失”“提取存在但原文未命中”“原文和提取均命中”
+      -> 回查原文证据片段，辅助人工快速定位
+      -> 对提取结果做原文溯源评分
+      -> 可选大模型深度审查，输出高风险问题和人工核对建议
+  -> Electron 前端模块化展示
 ```
 
 ## 功能概览
 
 - 支持上传 PDF、Word、图片、HTML 等招标文件
 - 支持自动解析策略推荐，也支持手动选择解析方式
+- 支持 PDF 类型预检：原生文本 PDF、扫描件 PDF、图文混排 PDF
+- 支持手动选择 PyMuPDF4LLM 快速解析原生文本 PDF
+- 支持手动选择 Docling 解析表格、章节层级和结构复杂的原生 PDF
 - 支持 MinerU VLM、MinerU Pipeline、MinerU-HTML
+- 支持长 PDF / 含图 PDF 使用 MinerU 并行页段解析
 - 支持本地 MinerU Pipeline
-- 支持 `pdfplumber` 本地 PDF 解析
+- `auto` 默认使用 `pdfplumber` 作为原生 PDF 稳定路线，并尽量还原页码、段落和 Markdown 表格
 - 支持 `docx2python`、`python-docx` Word 解析
-- 支持 DOCX 图片 OCR，使用 RapidOCR / Tesseract 作为本地补充
+- 支持 PDF / DOCX 图片提取和 OCR，使用 RapidOCR / Tesseract 作为本地补充
 - 支持大模型流式输出和非流式输出
-- 支持四个大模型分析任务并发执行
+- 支持五个大模型分析任务并发执行
+- 支持五个模块先按宽关键词/章节标题召回候选片段，再交给大模型提取，减少全文重复输入
 - 支持修改解析后的内容并重新分析
+- Electron 客户端支持自动启动 FastAPI 后端，并通过 `/health` 做端口连通性检查
+- 后端连接失败时，前端会显示端口、后端目录、健康检查结果和最近启动日志，便于定位依赖、端口占用或 Python 启动问题
 - 前端按五大模块展示：投标人须知、商务内容、技术要求、资格审查、评分要求
 - 资格审查支持资格性审查、符合性审查、废标项切换查看
 - 评分要求支持商务评分、技术评分切换查看
+- 商务内容、技术要求、内容审查统一使用 Markdown 展示区，Markdown 表格会直接渲染为可读表格
+- 图片解析支持图片卡片展示，保留图片预览、OCR 文本和 AI 备注
+- 各模块支持展开查看，展开后仍保留 Markdown 表格和图片卡片，不会退化为纯文本
+- 解析完成后可手动执行内容审查，使用正则匹配、关键词回查、原文证据片段和提取结果溯源比对各模块提取内容的完整性与准确性；也可选择支持深度思考的模型追加复核意见
+- 评分要求会先按“评分、评审、分值、商务评审、技术评审”等关键词筛选上下文，提高长文档提取稳定性
 
 ## 项目结构
 
@@ -49,6 +121,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ├── bid_analysis_prompts.py    # 大模型分析 Prompt
 ├── bid_document_parser.py     # 招标文件解析入口和章节拆分
 ├── bid_parse_strategy.py      # 解析方式推荐和解析质量报告
+├── bid_section_retriever.py   # 五大模块宽关键词召回，减少大模型全文重复读取
 ├── bid_image_analysis.py      # 文档图片分析和 OCR 辅助能力
 ├── MinerU_pdf_parse_tool.py   # MinerU API 文档解析工具
 ├── llm_client.py              # OpenAI-compatible 大模型客户端，支持同步、异步、流式
@@ -93,7 +166,10 @@ Python 依赖包括：
 - `fastapi`、`uvicorn`：后端 API 服务
 - `openai`：OpenAI-compatible 大模型调用
 - `python-dotenv`：读取本地环境变量
-- `pdfplumber`：本地 PDF 文本解析
+- `pymupdf`、`pymupdf4llm`：原生 PDF 快速抽取和 Markdown 转换
+- `docling`：复杂原生 PDF 的结构化解析、阅读顺序和表格结构还原
+- `pdfplumber`：PDF 预检、fallback 文本解析和简单表格抽取
+- `pypdf`：PDF 按页段拆分，用于 MinerU 并行页段解析
 - `docx2python`、`python-docx`：Word 文档解析
 - `pillow`、`opencv-python`、`rapidocr-onnxruntime`、`pytesseract`：图片和 OCR 辅助解析
 - `requests`、`pydantic`、`python-multipart`：接口、校验和上传支持
@@ -127,16 +203,46 @@ LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
 LLM_TIMEOUT=120
 LLM_MAX_CONCURRENCY=5
+LLM_STREAM_MAX_CONCURRENCY=1
+BID_RETRIEVAL_CONTEXT_CHARS=4500
+BID_RETRIEVAL_MAX_CHARS=52000
 
 MINERU_API_TOKEN=your-mineru-token
 MINERU_REQUEST_TIMEOUT=60
+MINERU_PARALLEL_PAGE_CHUNK_SIZE=30
+MINERU_PARALLEL_MAX_WORKERS=3
 
 SERPAPI_API_KEY=your-serpapi-key
 ```
 
 注意：`.env` 已加入 `.gitignore`，不要提交真实密钥。
 
-## 启动后端
+## 一键启动
+
+推荐双击项目根目录下的：
+
+```text
+start_dowell.bat
+```
+
+一键启动会自动完成：
+
+- 检查项目目录
+- 检查 8000 端口
+- 如果检测到旧的本项目后端，会自动停止旧进程
+- 启动 FastAPI 后端
+- 等待 `/health` 通过
+- 启动 Electron 前端
+
+启动后可打开健康检查确认：
+
+```text
+http://127.0.0.1:8000/health
+```
+
+如果看到 `status: ok` 和 `build` 字段，说明后端是新版。
+
+## 手动启动后端
 
 在项目根目录启动 FastAPI：
 
@@ -156,11 +262,11 @@ http://127.0.0.1:8000/health
 http://127.0.0.1:8000/docs
 ```
 
-## 启动前端
+## 手动启动前端
 
 ```powershell
 cd electron_client
-npm start
+npm.cmd start
 ```
 
 前端默认连接：
@@ -169,7 +275,65 @@ npm start
 http://127.0.0.1:8000
 ```
 
-如果后端端口发生变化，请在前端“后端地址”中同步修改。
+Electron 开发模式会尝试自动启动 FastAPI 后端，并检查：
+
+```text
+http://127.0.0.1:8000/health
+```
+
+如果后端端口发生变化，请在前端“后端地址”中同步修改。Electron 会按填写的端口重新检查连接。
+
+## 自动检查与端口诊断
+
+前端在上传解析或重新分析前，会先执行后端自动检查：
+
+```text
+Electron 主进程
+  -> 检查 127.0.0.1:端口 /health
+  -> 如果未连接，自动执行 python -m uvicorn bid_parser_api:app --host 127.0.0.1 --port 端口
+  -> 最多等待 30 秒
+  -> 捕获 uvicorn stdout / stderr 日志
+  -> 前端再次请求 /health
+```
+
+如果仍然失败，前端结果区会显示：
+
+- 错误类型和错误信息
+- 当前端口
+- `/health` 健康检查是否通过
+- Electron 是否托管了后端进程
+- 后端目录
+- 最近后端启动日志
+
+常见原因：
+
+- Python 没有加入系统 PATH，导致 Electron 无法执行 `python`
+- 端口 `8000` 被其他程序占用
+- 依赖没有安装完整，例如缺少 `fastapi`、`uvicorn`、`python-multipart`
+- 当前运行的是旧的打包 exe，未包含最新源码改动
+- 后端启动目录不对，找不到 `bid_parser_api.py`
+
+如果自动启动失败，可以手动启动后端验证：
+
+```powershell
+python -m uvicorn bid_parser_api:app --host 127.0.0.1 --port 8000
+```
+
+看到 `/health` 返回 `{"status":"ok"}` 后，再启动 Electron 前端。
+
+注意：如果双击的是已经打包的旧 exe，它内部使用的是打包时的 `app.asar`，不会自动读取源码里的最新 `main.js`、`preload.js`、`renderer.js`。测试最新改动请使用：
+
+```powershell
+cd electron_client
+npm start
+```
+
+确认无误后再重新打包：
+
+```powershell
+cd electron_client
+npm run dist
+```
 
 ## 常用接口
 
@@ -207,21 +371,63 @@ mineru_vlm            MinerU VLM
 mineru_pipeline       MinerU Pipeline
 mineru_html           MinerU-HTML
 mineru_local_pipeline 本地 MinerU Pipeline
-pdfplumber            本地 PDF 文本解析
+mineru_parallel_pages MinerU 并行页段解析
+pymupdf4llm           PyMuPDF4LLM 快速 PDF 解析
+docling               Docling 结构化 PDF 解析
+pdfplumber            本地 PDF fallback 文本解析
 docx2python           本地 Word 文本解析
 docx2python_image_ocr Word 文本解析 + 图片 OCR
 ```
 
-`auto` 会根据文件类型、文本量、DOCX 图片数量等因素推荐解析方式。
+`auto` 会根据文件类型、文本量、PDF 图片数量、PDF 表格信号、PDF 页数、DOCX 图片数量等因素推荐解析方式。PDF 会先进入两层智能解析流程：
+
+1. 解析层：判断 PDF 是原生文本 PDF、扫描件 PDF 还是图文混排 PDF。为保证稳定性，原生文本 PDF 的 `auto` 默认使用 `pdfplumber`；`pymupdf4llm` 和 `docling` 保留为手动增强选项；扫描件 PDF 优先使用 OCR / MinerU VLM，图文混排 PDF 优先使用 MinerU 多模态能力。
+2. 结构还原层：尽量保留页码、标题层级、章节、段落、表格、图片说明、页眉页脚等结构线索，统一组织为 Markdown。
+
+扫描件 PDF 或含正文图片的图文混排 PDF 会优先推荐 `mineru_vlm` 或 `mineru_parallel_pages`，避免仅依赖本地文本层。`pymupdf4llm` / `docling` 在部分 Windows 环境可能受到 ONNXRuntime、torch 或模型依赖影响，因此不作为默认自动路线。
+
+推荐路由：
+
+```text
+原生文本 PDF              -> pdfplumber
+需要快速试验原生 PDF       -> 手动选择 pymupdf4llm
+需要结构化试验复杂 PDF     -> 手动选择 docling
+扫描件 PDF                -> mineru_vlm / mineru_parallel_pages
+图文混排 PDF              -> mineru_parallel_pages
+手动兜底/排障             -> pdfplumber
+```
+
+`mineru_parallel_pages` 主要用于较大的 PDF 招标文件。后端会按页段拆分 PDF，并发调用 MinerU，再按页码顺序合并 Markdown。可通过 `.env` 调整：
+
+```env
+MINERU_PARALLEL_PAGE_CHUNK_SIZE=30
+MINERU_PARALLEL_MAX_WORKERS=3
+```
+
+并发数不要一次调得过高，避免触发 MinerU 接口限流或本地资源占满。
 
 ## 大模型分析策略
 
-后端会将解析后的文档内容组装为 Markdown，然后并发执行四个大模型分析任务：
+前端默认模型为 `Qwen3-8B (轻量)`，优先保证可访问性和响应速度。`DeepSeek-V4-Pro`、`Kimi-K2.6 (Pro)` 等 Pro 模型仍保留在模型列表中，适合需要更高质量复核时手动选择；如果服务商返回 `Model is private`，说明当前账号无权调用该模型，需要换用可访问模型或在服务商后台开通权限。
+
+后端会将解析后的文档内容组装为 Markdown，然后先按模块做“宽关键词检索”，再并发执行五个大模型分析任务：
 
 - 投标人须知 / 项目概览
+- 商务内容
 - 技术要求
 - 资格审查
 - 评分要求
+
+每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免五个模块反复读取整份长文档。关键词采用宽匹配策略，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。
+
+默认上下文参数：
+
+```env
+BID_RETRIEVAL_CONTEXT_CHARS=4500
+BID_RETRIEVAL_MAX_CHARS=52000
+```
+
+其中 `BID_RETRIEVAL_CONTEXT_CHARS` 控制每个命中点前后的窗口大小，`BID_RETRIEVAL_MAX_CHARS` 控制每个模块最多交给大模型的候选文本长度。文件特别长时可以适当调低，担心漏内容时可以适当调高。
 
 前端可以选择：
 
@@ -229,6 +435,47 @@ docx2python_image_ocr Word 文本解析 + 图片 OCR
 - 非流式输出
 
 流式接口会边分析边返回事件；非流式接口会等待全部分析完成后一次性返回结果。
+
+流式大模型调用默认使用 `LLM_STREAM_MAX_CONCURRENCY=1`，稳定优先。部分 OpenAI-compatible 服务商对多路并发流式请求支持不稳定，可能触发连接中断或 `[Errno 22] Invalid argument`。如需提速，可逐步调到 `2`，不建议直接拉高。
+
+## 前端展示与审查
+
+解析结果在 Electron 前端按模块展示：
+
+- 投标人须知：字段化表单展示，支持复制和展开。
+- 商务内容：Markdown 展示区，商务条款表格直接渲染为表格。
+- 技术要求：Markdown 展示区，技术参数、服务要求和表格内容直接渲染。
+- 资格审查：按资格性审查、符合性审查、废标项切换，表格化展示。
+- 评分要求：按商务评分、技术评分切换，表格化展示。
+- 图片解析：以图片卡片展示，保留图片预览、OCR 文本和 AI 备注。
+- 内容审查：Markdown 展示区，正则审查和大模型深度复核结果直接渲染为表格和分节报告。
+
+各模块的“展开”按钮使用富文本预览：
+
+- Markdown 表格在展开窗口中仍显示为表格。
+- 图片解析在展开窗口中仍显示图片卡片。
+- 复制和导出仍使用原始 Markdown / 文本内容，便于留档和二次编辑。
+
+## 性能说明
+
+智能解析为了提高准确率，会同时做 PDF 类型判断、结构还原、图片提取/OCR、五个模块的大模型分析以及评分上下文筛选，因此复杂文件会比单纯文本抽取更慢。PDF 解析已经改为“快解析 + 结构化 + 多模态”的分流策略。常见耗时来源包括：
+
+- `pdfplumber` 是 `auto` 下原生 PDF 的稳定默认路线。
+- `pymupdf4llm` 适合原生文本 PDF 快速试验，但在部分 Windows/ONNXRuntime 环境可能不稳定。
+- `docling` 适合原生 PDF 中的表格、章节层级和复杂阅读顺序，但依赖较重，建议手动选择后小范围测试。
+- 扫描件 PDF 或图文混排 PDF 需要调用 MinerU / OCR。
+- `mineru_parallel_pages` 会按页段拆分 PDF，并发提交 MinerU，速度受网络、接口排队和并发数影响。
+- 本地 `pdfplumber` 主要用于 PDF 预检、fallback 和排障，不再作为默认主力解析器。
+- PDF / DOCX 图片解析会额外执行图片提取、OCR 和 AI 备注。
+- 五个模块的大模型分析会先检索候选片段再并发执行，速度主要受候选片段长度、模型速度、服务商并发限制影响。
+
+建议使用方式：
+
+- 原生文本 PDF 默认使用 `auto`，会走 `pdfplumber` 稳定路线。
+- 需要更快或更强结构化效果时，再手动试 `pymupdf4llm` 或 `docling`。
+- 扫描件、图文混排、图片较多的文件，使用 `auto` 或 `mineru_parallel_pages`。
+- 大文件可以先填写页码范围做小范围测试，再解析整份文件。
+- 如果 MinerU 限流或速度较慢，可以适当降低 `MINERU_PARALLEL_MAX_WORKERS`。
 
 ## MinerU 本地部署
 
@@ -262,6 +509,8 @@ electron_client/dist/
 ```
 
 `electron_client/dist/` 已加入 `.gitignore`，不要提交打包产物。
+
+打包后的 exe 会包含当时的 Electron 前端文件和后端 Python 文件。如果修改了 `electron_client/main.js`、`preload.js`、`renderer.js`、`styles.css` 或后端 `.py` 文件，需要重新执行 `npm run dist` 生成新版 exe。
 
 ## 不要提交的内容
 

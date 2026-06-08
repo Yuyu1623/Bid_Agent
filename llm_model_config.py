@@ -1,10 +1,7 @@
 # 这个脚本负责管理前端模型名称和真实大模型接口名称的对应关系。
 # -*- coding: utf-8 -*-
 import os
-from pathlib import Path
 from typing import Dict
-
-from dotenv import set_key
 
 
 LLM_VENDOR_OPTIONS: Dict[str, str] = {
@@ -25,6 +22,10 @@ SILICONFLOW_MODEL_OPTIONS: Dict[str, str] = {
     "GLM-4.7 (Pro)": "zai-org/GLM-4.7",
     "DeepSeek-R1 (Pro)": "deepseek-ai/DeepSeek-R1",
     "Qwen3.6-35B-A3B": "Qwen/Qwen3.6-35B-A3B",
+    "Qwen3-8B (轻量)": "Qwen/Qwen3-8B",
+    "GLM-4-9B-Chat (轻量)": "THUDM/glm-4-9b-chat",
+    "DeepSeek-R1-Distill-Qwen-7B (轻量)": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    "Kimi-K2-Instruct (轻量)": "moonshotai/Kimi-K2-Instruct",
 }
 
 
@@ -57,16 +58,9 @@ def apply_llm_env_selection(
     model_name: str,
     env_path: str = ".env",
 ) -> tuple[str, str]:
-    """Persist selected provider/model into .env and current process env."""
+    """Apply selected provider/model to the current process only."""
     resolved_model = resolve_llm_model(vendor, model_name)
     base_url = resolve_llm_base_url(vendor)
-    path = Path(env_path)
-
-    if path.exists():
-        set_key(str(path), "LLM_VENDOR", vendor)
-        set_key(str(path), "LLM_MODEL_DISPLAY_NAME", model_name)
-        set_key(str(path), "LLM_MODEL_ID", resolved_model)
-        set_key(str(path), "LLM_BASE_URL", base_url)
 
     os.environ["LLM_VENDOR"] = vendor
     os.environ["LLM_MODEL_DISPLAY_NAME"] = model_name

@@ -304,3 +304,219 @@ def _section_to_markdown(section: Any) -> str:
     if markdown.startswith("#") or not title:
         return markdown
     return f"## {title}\n{markdown}".strip()
+
+
+BUSINESS_CONTENT_SYSTEM_PROMPT_V2 = """你是专业的招投标文件商务条款分析师。请从招标文件内容中提取“商务内容”，重点整理投标报价、合同条款、交付服务、商务响应材料和其他商务关键要求。
+
+输出要求：
+- 尽量使用招标文件原文表达，不要自行扩展、推断或编造。
+- 如果招标文件中没有明确提到某项内容，请写“未明确”。
+- 如果某项内容存在多个条款，请合并整理，但保留关键原文信息、数值、期限、比例和限制条件。
+- 只提取商务内容，不要输出技术要求、资格审查、商务评分、技术评分或价格评分。
+- 使用 Markdown 表格，严格按以下结构输出：
+- 每个二级标题下面必须是 Markdown 表格，不要用项目符号列表、普通段落、JSON 或代码块替代表格。
+- 表格分隔行必须使用 `| --- | --- |`，确保前端可以渲染为表格。
+
+# 商务内容
+
+## 一、投标报价要求
+| 项目 | 内容 |
+| --- | --- |
+| 报价方式 | |
+| 报价范围 | |
+| 最高限价/预算限制 | |
+| 分项报价要求 | |
+| 费用包含范围 | |
+| 报价无效情形 | |
+
+## 二、合同条款要求
+| 项目 | 内容 |
+| --- | --- |
+| 合同签订要求 | |
+| 履行期限 | |
+| 履行地点 | |
+| 付款方式 | |
+| 付款节点/比例 | |
+| 验收方式 | |
+| 违约责任 | |
+| 争议解决 | |
+
+## 三、交付与服务要求
+| 项目 | 内容 |
+| --- | --- |
+| 交付时间 | |
+| 交付地点 | |
+| 交付方式 | |
+| 服务期限 | |
+| 售后服务 | |
+| 培训要求 | |
+| 运维/质保/维保要求 | |
+
+## 四、投标文件商务响应要求
+| 材料/要求 | 具体内容 |
+| --- | --- |
+| 商务偏离表 | |
+| 报价表 | |
+| 分项报价表 | |
+| 授权/承诺/声明文件 | |
+| 投标保证金 | |
+| 履约保证金 | |
+| 其他商务材料 | |
+
+## 五、其他商务关键要求
+| 项目 | 内容 |
+| --- | --- |
+| 联合体投标 | |
+| 转包/分包 | |
+| 进口产品 | |
+| 中小企业采购 | |
+| 政策优惠 | |
+| 其他关键要求 | |"""
+
+
+BUSINESS_CONTENT_USER_PROMPT_TEMPLATE_V2 = """请分析以下招标文件内容，提取商务内容：
+
+{file_content}"""
+
+
+BUSINESS_SCORING_SYSTEM_PROMPT_V2 = """你是专业的招标文件评分办法分析师。请从招标文件中提取“商务评分”和“技术评分”。
+
+请严格输出以下两个 Markdown 表格：
+
+## 商务评分
+| 评分项 | 评分标准 | 分数 |
+| --- | --- | --- |
+| 原文评分项 | 原文评分标准、得分条件、证明材料、扣分/不得分条件 | 分值 |
+
+## 技术评分
+| 评分项 | 评分标准 | 分数 |
+| --- | --- | --- |
+| 原文评分项 | 原文评分标准、得分条件、证明材料、扣分/不得分条件 | 分值 |
+
+要求：
+- 商务评分通常包括业绩、资质、信誉、人员、服务能力、企业实力、类似项目经验、认证证书、商务响应等。
+- 技术评分通常包括技术方案、实施方案、服务方案、质量保障、进度安排、应急方案、售后服务、培训方案等。
+- 商务评分和技术评分必须分开，不要把技术方案类评分放入商务评分。
+- “评分标准”中保留原文的档位、条件、证明材料、扣分/不得分规则。
+- “分数”中保留原文分值，如“5分”“0-3分”“最高10分”；未明确写“未明确”。
+- 不要输出价格评分，除非招标文件把价格评分归入商务评分且无法拆分；此时在评分项中标明“价格/报价评分”。
+- 未发现某个模块内容时，该模块仍保留表头，并写一行“未提及”。
+- 不要编造招标文件未写明的评分项。"""
+
+
+BUSINESS_SCORING_USER_PROMPT_TEMPLATE_V2 = """请分析以下招标文件内容，提取商务评分和技术评分要求：
+
+{file_content}"""
+
+
+def build_business_content_messages(file_content: str) -> List[Dict[str, str]]:
+    """Build messages for extracting business content."""
+    return [
+        {"role": "system", "content": BUSINESS_CONTENT_SYSTEM_PROMPT_V2},
+        {
+            "role": "user",
+            "content": BUSINESS_CONTENT_USER_PROMPT_TEMPLATE_V2.format(
+                file_content=file_content.strip()
+            ),
+        },
+    ]
+
+
+def build_business_content_messages_from_sections(
+    sections: Iterable[Any],
+) -> List[Dict[str, str]]:
+    """Build business content messages from parsed sections."""
+    file_content = sections_to_file_content(sections)
+    return build_business_content_messages(file_content)
+
+
+def build_business_scoring_messages(file_content: str) -> List[Dict[str, str]]:
+    """Build messages for extracting business and technical scoring."""
+    return [
+        {"role": "system", "content": BUSINESS_SCORING_SYSTEM_PROMPT_V2},
+        {
+            "role": "user",
+            "content": BUSINESS_SCORING_USER_PROMPT_TEMPLATE_V2.format(
+                file_content=file_content.strip()
+            ),
+        },
+    ]
+
+
+def build_business_scoring_messages_from_sections(
+    sections: Iterable[Any],
+) -> List[Dict[str, str]]:
+    """Build scoring messages from parsed sections."""
+    file_content = sections_to_scoring_context(sections)
+    return build_business_scoring_messages(file_content)
+
+
+SCORING_CONTEXT_KEYWORDS = (
+    "评分",
+    "评审",
+    "评标",
+    "评审因素",
+    "评分标准",
+    "评分办法",
+    "评分细则",
+    "详细评审",
+    "综合评分",
+    "商务评分",
+    "商务评审",
+    "商务部分",
+    "资信评分",
+    "资信部分",
+    "企业实力",
+    "业绩",
+    "技术评分",
+    "技术评审",
+    "技术部分",
+    "技术方案",
+    "实施方案",
+    "服务方案",
+    "分值",
+    "得分",
+    "满分",
+    "扣分",
+    "不得分",
+)
+
+
+def sections_to_scoring_context(
+    sections: Iterable[Any],
+    window: int = 2,
+    max_chars: int = 36000,
+) -> str:
+    """Extract scoring-related sections and nearby context before asking the LLM."""
+    section_texts = [_section_to_markdown(section).strip() for section in sections]
+    section_texts = [text for text in section_texts if text]
+    if not section_texts:
+        return ""
+
+    hit_indexes = [
+        index
+        for index, text in enumerate(section_texts)
+        if any(keyword in text for keyword in SCORING_CONTEXT_KEYWORDS)
+    ]
+    if not hit_indexes:
+        return "\n\n".join(section_texts)[-max_chars:]
+
+    selected_indexes = set()
+    for index in hit_indexes:
+        start = max(0, index - window)
+        end = min(len(section_texts), index + window + 1)
+        selected_indexes.update(range(start, end))
+
+    selected_texts = [section_texts[index] for index in sorted(selected_indexes)]
+    context = "\n\n".join(selected_texts).strip()
+    if len(context) <= max_chars:
+        return context
+
+    scoring_lines = [
+        line
+        for line in context.splitlines()
+        if any(keyword in line for keyword in SCORING_CONTEXT_KEYWORDS)
+        or line.strip().startswith(("|", "#"))
+    ]
+    compressed = "\n".join(scoring_lines).strip()
+    return (compressed or context)[-max_chars:]

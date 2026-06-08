@@ -98,11 +98,17 @@
             <label>
               PDF / 文档解析方式
               <select id="parseMethod">
+                <option value="auto">智能推荐解析</option>
                 <option value="mineru_vlm">MinerU VLM 模型</option>
                 <option value="mineru_pipeline">MinerU Pipeline 模型</option>
                 <option value="mineru_html">MinerU-HTML 模型</option>
-                <option value="pdfplumber">pdfplumber 本地 PDF</option>
-                <option value="docx2python">docx2python 本地 Word</option>
+                <option value="mineru_parallel_pages">MinerU 并行页段</option>
+                <option value="mineru_local_pipeline">本地 MinerU Pipeline</option>
+                <option value="pymupdf4llm">PyMuPDF4LLM 快速 PDF</option>
+                <option value="docling">Docling 结构化 PDF</option>
+                <option value="pdfplumber">本地 pdfplumber PDF</option>
+                <option value="docx2python">本地 docx2python Word</option>
+                <option value="docx2python_image_ocr">本地 docx2python + RapidOCR Word</option>
               </select>
             </label>
             <label>
@@ -112,15 +118,29 @@
               </select>
             </label>
             <label>
-              大模型
+              <span class="label-row">
+                大模型
+                <span class="inline-check" title="开启后会要求大模型进行更充分的内部分析，速度可能变慢">
+                  <input id="enableDeepThinking" type="checkbox" />
+                  深度思考
+                </span>
+              </span>
               <select id="llmModel">
-                <option value="DeepSeek-V4-Pro">DeepSeek-V4-Pro</option>
-                <option value="Kimi-K2.6 (Pro)">Kimi-K2.6 (Pro)</option>
-                <option value="GLM-5.1 (Pro)">GLM-5.1 (Pro)</option>
-                <option value="MiniMax-M2.5">MiniMax-M2.5</option>
-                <option value="GLM-4.7 (Pro)">GLM-4.7 (Pro)</option>
-                <option value="DeepSeek-R1 (Pro)">DeepSeek-R1 (Pro)</option>
-                <option value="Qwen3.6-35B-A3B">Qwen3.6-35B-A3B</option>
+                <optgroup label="主力模型">
+                  <option value="Qwen3-8B (轻量)" selected>Qwen3-8B (轻量)</option>
+                  <option value="Kimi-K2.6 (Pro)">Kimi-K2.6 (Pro)</option>
+                  <option value="DeepSeek-V4-Pro">DeepSeek-V4-Pro</option>
+                  <option value="GLM-5.1 (Pro)">GLM-5.1 (Pro)</option>
+                  <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+                  <option value="GLM-4.7 (Pro)">GLM-4.7 (Pro)</option>
+                  <option value="DeepSeek-R1 (Pro)">DeepSeek-R1 (Pro)</option>
+                  <option value="Qwen3.6-35B-A3B">Qwen3.6-35B-A3B</option>
+                </optgroup>
+                <optgroup label="轻量模型">
+                  <option value="GLM-4-9B-Chat (轻量)">GLM-4-9B-Chat (轻量)</option>
+                  <option value="DeepSeek-R1-Distill-Qwen-7B (轻量)">DeepSeek-R1-Distill-Qwen-7B (轻量)</option>
+                  <option value="Kimi-K2-Instruct (轻量)">Kimi-K2-Instruct (轻量)</option>
+                </optgroup>
               </select>
             </label>
             <label>
@@ -182,7 +202,11 @@
           <header class="content-header">
             <div>
               <h2>招标文件内容</h2>
-              <p id="statusText">等待上传</p>
+              <div class="status-row">
+                <p id="statusText">等待上传</p>
+                <span id="parseDuration" class="parse-duration hidden">用时：--</span>
+              </div>
+              <div id="parseQuality" class="parse-quality hidden"></div>
             </div>
             <div class="view-tabs">
               <button class="tab active" type="button" data-tab="notice">投标人须知</button>
@@ -190,7 +214,8 @@
               <button class="tab" type="button" data-tab="technical">技术要求</button>
               <button class="tab" type="button" data-tab="qualification">资格审查</button>
               <button class="tab" type="button" data-tab="scoring">评分要求</button>
-              <button class="tab" type="button" data-tab="parsed">解析原文</button>
+              <button class="tab" type="button" data-tab="contentReview">内容审查</button>
+              <button class="tab" type="button" data-tab="parsed">图片解析</button>
             </div>
           </header>
 
@@ -220,7 +245,7 @@
                 <button class="ghost-btn" type="button" data-export="businessOutput" data-name="商务内容.txt">导出</button>
               </div>
             </div>
-            <textarea id="businessOutput" class="output" readonly placeholder="该部分 Prompt 暂未编写，暂不输出结构化内容。"></textarea>
+            <div id="businessOutput" class="output markdown-output" data-raw-text=""></div>
           </section>
 
           <section id="technical" class="tab-panel">
@@ -232,7 +257,7 @@
                 <button class="ghost-btn" type="button" data-export="technicalOutput" data-name="技术要求.txt">导出</button>
               </div>
             </div>
-            <textarea id="technicalOutput" class="output" readonly>暂无结果</textarea>
+            <div id="technicalOutput" class="output markdown-output" data-raw-text="暂无结果">暂无结果</div>
           </section>
 
           <section id="qualification" class="tab-panel">
@@ -265,15 +290,39 @@
 
           <section id="parsed" class="tab-panel">
             <div class="panel-title">
-              <h3>解析后的招标内容</h3>
+              <h3>图片解析</h3>
               <div class="panel-actions">
-                <button id="reanalyzeEditedBtn" class="ghost-btn" type="button">用修改内容重新分析</button>
                 <button class="ghost-btn" type="button" data-copy="parsedMarkdownOutput">复制</button>
-                <button class="ghost-btn" type="button" data-expand="parsedMarkdownOutput" data-title="解析后的招标内容">展开</button>
-                <button class="ghost-btn" type="button" data-export="parsedMarkdownOutput" data-name="解析后的招标内容.md">导出</button>
+                <button class="ghost-btn" type="button" data-expand="parsedMarkdownOutput" data-title="图片解析">展开</button>
+                <button class="ghost-btn" type="button" data-export="parsedMarkdownOutput" data-name="图片解析.md">导出</button>
               </div>
             </div>
-            <textarea id="parsedMarkdownOutput" class="output editable-output" placeholder="文件解析完成后，解析出的 Markdown 会显示在这里，可直接修改后重新分析。"></textarea>
+            <div id="parsedMarkdownOutput" class="output-area image-analysis-view">
+              文件解析完成后，图片 OCR 文本和 AI 备注会显示在这里。
+            </div>
+          </section>
+
+          <section id="contentReview" class="tab-panel">
+            <div class="panel-title">
+              <h3>内容审查</h3>
+              <div class="panel-actions">
+                <select id="contentReviewModel" class="compact-select" title="内容审查模型">
+                  <option value="Qwen3-8B (轻量)" selected>Qwen3-8B</option>
+                  <option value="Qwen3.6-35B-A3B">Qwen3.6-35B</option>
+                  <option value="DeepSeek-R1 (Pro)">DeepSeek-R1</option>
+                  <option value="DeepSeek-R1-Distill-Qwen-7B (轻量)">R1-Distill-7B</option>
+                </select>
+                <label class="inline-check review-deep-check" title="内容审查可使用支持深度思考的模型进行复核">
+                  <input id="contentReviewDeepThinking" type="checkbox" checked />
+                  深度思考
+                </label>
+                <button id="runContentReviewBtn" class="ghost-btn" type="button">执行审查</button>
+                <button class="ghost-btn" type="button" data-copy="contentReviewOutput">复制</button>
+                <button class="ghost-btn" type="button" data-expand="contentReviewOutput" data-title="内容审查">展开</button>
+                <button class="ghost-btn" type="button" data-export="contentReviewOutput" data-name="内容审查.md">导出</button>
+              </div>
+            </div>
+            <div id="contentReviewOutput" class="output markdown-output" data-raw-text="解析完成后，将在这里显示内容审查报告。">解析完成后，将在这里显示内容审查报告。</div>
           </section>
 
           <div class="step-actions">
@@ -293,10 +342,12 @@
         <header>
           <h2 id="viewerTitle">内容查看</h2>
           <div class="viewer-actions">
+            <button id="viewerSaveBtn" class="ghost-btn" type="button">保存修改</button>
             <button id="viewerCopyBtn" class="ghost-btn" type="button">复制</button>
             <button class="ghost-btn" type="button" data-close-viewer>关闭</button>
           </div>
         </header>
+        <div id="viewerRich" class="viewer-rich" hidden></div>
         <textarea id="viewerText" class="viewer-text" readonly></textarea>
       </section>
     </div>

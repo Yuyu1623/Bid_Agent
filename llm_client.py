@@ -12,6 +12,13 @@ from openai import AsyncOpenAI, OpenAI
 load_dotenv()
 
 
+def _safe_print(*args, **kwargs) -> None:
+    try:
+        print(*args, **kwargs)
+    except Exception:
+        pass
+
+
 class LLM_Invoke:
     def __init__(
         self,
@@ -19,11 +26,13 @@ class LLM_Invoke:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: Optional[int] = None,
+        enable_deep_thinking: bool = False,
     ):
         self.model = model or os.getenv("LLM_MODEL_ID")
         api_key = api_key or os.getenv("LLM_API_KEY")
         base_url = base_url or os.getenv("LLM_BASE_URL")
         self.timeout = timeout or int(os.getenv("LLM_TIMEOUT", "120"))
+        self.enable_deep_thinking = enable_deep_thinking
 
         if not all([self.model, api_key, base_url]):
             raise ValueError(
@@ -45,30 +54,26 @@ class LLM_Invoke:
         stream: bool = True,
     ) -> str:
         """Call the model synchronously and optionally stream chunks to stdout."""
-        print(f"\n[model call] model={self.model}, stream={stream}")
+        _safe_print(f"\n[model call] model={self.model}, stream={stream}")
         if not stream:
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
+                **self._completion_kwargs(messages, temperature),
             )
             content = response.choices[0].message.content or ""
-            print(content)
+            _safe_print(content)
             return content
 
         response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
+            **self._completion_kwargs(messages, temperature),
             stream=True,
         )
 
         chunks: List[str] = []
         for chunk in response:
             content = chunk.choices[0].delta.content or ""
-            print(content, end="", flush=True)
+            _safe_print(content, end="", flush=True)
             chunks.append(content)
-        print()
+        _safe_print()
         return "".join(chunks)
 
     async def athink(
@@ -78,28 +83,24 @@ class LLM_Invoke:
         stream: bool = False,
     ) -> str:
         """Call the model asynchronously and optionally stream chunks to stdout."""
-        print(f"\n[async model call] model={self.model}, stream={stream}")
+        _safe_print(f"\n[async model call] model={self.model}, stream={stream}")
 
         if stream:
             response = await self.async_client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
+                **self._completion_kwargs(messages, temperature),
                 stream=True,
             )
 
             chunks: List[str] = []
             async for chunk in response:
                 content = chunk.choices[0].delta.content or ""
-                print(content, end="", flush=True)
+                _safe_print(content, end="", flush=True)
                 chunks.append(content)
-            print()
+            _safe_print()
             return "".join(chunks)
 
         response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
+            **self._completion_kwargs(messages, temperature),
         )
         return response.choices[0].message.content or ""
 
@@ -109,19 +110,17 @@ class LLM_Invoke:
         temperature: float = 0,
     ):
         """Yield streamed text chunks from one chat completion."""
-        print(f"\n[async stream model call] model={self.model}")
+        _safe_print(f"\n[async stream model call] model={self.model}")
         response = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
+            **self._completion_kwargs(messages, temperature),
             stream=True,
         )
         async for chunk in response:
             content = chunk.choices[0].delta.content or ""
             if content:
-                print(content, end="", flush=True)
+                _safe_print(content, end="", flush=True)
                 yield content
-        print()
+        _safe_print()
 
     async def think_many(
         self,
@@ -156,3 +155,48 @@ class LLM_Invoke:
                 stream=stream,
             )
         )
+
+    def _completion_kwargs(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+    ) -> Dict[str, object]:
+        kwargs: Dict[str, object] = {
+            "model": self.model,
+            "messages": self._prepare_messages(messages),
+            "temperature": temperature,
+        }
+        extra_body = self._deep_thinking_extra_body()
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        return kwargs
+
+    def _prepare_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        if not self._supports_deep_thinking():
+            return messages
+
+        thinking_instruction = (
+            "请开启深度思考模式。先在内部充分分析招标文件上下文、评分规则、"
+            "显性和隐性要求，再输出最终结果。最终回复只保留用户要求的内容，"
+            "不要输出思考过程。"
+        )
+        prepared = [dict(message) for message in messages]
+        for message in prepared:
+            if message.get("role") == "system":
+                message["content"] = f"{message.get('content', '')}\n\n{thinking_instruction}"
+                return prepared
+        return [{"role": "system", "content": thinking_instruction}, *prepared]
+
+    def _deep_thinking_extra_body(self) -> Dict[str, object]:
+        if not self._supports_deep_thinking():
+            return {}
+        model_name = (self.model or "").lower()
+        if "qwen" in model_name:
+            return {"enable_thinking": True}
+        return {}
+
+    def _supports_deep_thinking(self) -> bool:
+        if not self.enable_deep_thinking:
+            return False
+        model_name = (self.model or "").lower()
+        return "qwen" in model_name or "deepseek-r1" in model_name

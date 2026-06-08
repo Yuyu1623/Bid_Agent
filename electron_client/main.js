@@ -6,6 +6,22 @@ const fs = require("fs");
 
 let backendProcess = null;
 let backendPort = null;
+let backendLogLines = [];
+
+function rememberBackendLog(line) {
+  const text = String(line || "").trim();
+  if (!text) {
+    return;
+  }
+  backendLogLines.push(`[${new Date().toLocaleTimeString()}] ${text}`);
+  if (backendLogLines.length > 80) {
+    backendLogLines = backendLogLines.slice(-80);
+  }
+}
+
+function getBackendLogs() {
+  return backendLogLines.slice();
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -61,12 +77,27 @@ function checkBackend(port) {
       {
         host: "127.0.0.1",
         port,
-        path: "/openapi.json",
-        timeout: 1800
+        path: "/health",
+        timeout: 2500
       },
       (response) => {
-        response.resume();
-        resolve(response.statusCode >= 200 && response.statusCode < 500);
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode < 200 || response.statusCode >= 500) {
+            resolve(false);
+            return;
+          }
+          try {
+            const data = JSON.parse(body || "{}");
+            resolve(data.status === "ok" || response.statusCode < 500);
+          } catch {
+            resolve(response.statusCode >= 200 && response.statusCode < 500);
+          }
+        });
       }
     );
     request.on("timeout", () => {
@@ -77,13 +108,13 @@ function checkBackend(port) {
   });
 }
 
-async function waitForBackend(port, timeoutMs = 15000) {
+async function waitForBackend(port, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await checkBackend(port)) {
       return true;
     }
-    await new Promise((resolve) => setTimeout(resolve, 450));
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return false;
 }
@@ -100,13 +131,14 @@ async function ensureBackend(apiBase) {
   const { port } = parseBackendTarget(apiBase);
 
   if (backendPort === port && (await checkBackend(port))) {
-    return { port, status: "running" };
+    return { port, status: "running", logs: getBackendLogs() };
   }
 
   if (await checkBackend(port)) {
     stopOwnedBackend();
     backendPort = port;
-    return { port, status: "external-running" };
+    rememberBackendLog(`Detected existing backend on port ${port}.`);
+    return { port, status: "external-running", logs: getBackendLogs() };
   }
 
   if (backendPort !== port) {
@@ -114,39 +146,74 @@ async function ensureBackend(apiBase) {
   }
 
   const backendDir = findBackendDirectory();
+  const pythonExecutable = process.env.PYTHON || "python";
+  backendLogLines = [];
+  rememberBackendLog(`Starting backend: ${pythonExecutable} -m uvicorn bid_parser_api:app --host 127.0.0.1 --port ${port}`);
+  rememberBackendLog(`Backend cwd: ${backendDir}`);
+
   backendProcess = spawn(
-    "python",
+    pythonExecutable,
     ["-m", "uvicorn", "bid_parser_api:app", "--host", "127.0.0.1", "--port", String(port)],
     {
       cwd: backendDir,
       windowsHide: true,
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       detached: false
     }
   );
   backendPort = port;
 
-  backendProcess.on("exit", () => {
+  backendProcess.stdout.on("data", (data) => rememberBackendLog(data.toString()));
+  backendProcess.stderr.on("data", (data) => rememberBackendLog(data.toString()));
+  backendProcess.on("error", (error) => {
+    rememberBackendLog(`Backend process error: ${error.message}`);
+  });
+  backendProcess.on("exit", (code, signal) => {
+    rememberBackendLog(`Backend exited. code=${code ?? ""} signal=${signal ?? ""}`);
     backendProcess = null;
     backendPort = null;
   });
 
   const ok = await waitForBackend(port);
   if (!ok) {
+    const logs = getBackendLogs().slice(-20).join("\n") || "无后端日志。";
     stopOwnedBackend();
-    throw new Error(`后端启动失败，请检查 Python 依赖和端口 ${port} 是否可用。`);
+    throw new Error(`后端启动或连接失败：30 秒内未通过 /health 检查。\n端口：${port}\n后端目录：${backendDir}\n\n最近日志：\n${logs}`);
   }
 
-  return { port, status: "started" };
+  return { port, status: "started", backendDir, logs: getBackendLogs() };
+}
+
+async function diagnoseBackend(apiBase) {
+  const { port } = parseBackendTarget(apiBase);
+  let backendDir = "";
+  try {
+    backendDir = findBackendDirectory();
+  } catch (error) {
+    backendDir = `未找到：${error.message}`;
+  }
+  return {
+    port,
+    healthy: await checkBackend(port),
+    ownedProcess: Boolean(backendProcess),
+    backendDir,
+    logs: getBackendLogs()
+  };
 }
 
 ipcMain.handle("backend:ensure", async (_event, apiBase) => {
   return ensureBackend(apiBase);
 });
 
+ipcMain.handle("backend:diagnose", async (_event, apiBase) => {
+  return diagnoseBackend(apiBase);
+});
+
 app.whenReady().then(async () => {
   createWindow();
-  ensureBackend("http://127.0.0.1:8000").catch(() => {});
+  ensureBackend("http://127.0.0.1:8000").catch((error) => {
+    rememberBackendLog(`Initial backend ensure failed: ${error.message}`);
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

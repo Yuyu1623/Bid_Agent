@@ -4,6 +4,8 @@ const chooseFileBtn = document.querySelector("#chooseFileBtn");
 const resetBtn = document.querySelector("#resetBtn");
 const fileName = document.querySelector("#fileName");
 const statusText = document.querySelector("#statusText");
+const parseDuration = document.querySelector("#parseDuration");
+const parseQuality = document.querySelector("#parseQuality");
 const submitBtn = document.querySelector("#submitBtn");
 const reviewDoneBtn = document.querySelector("#reviewDoneBtn");
 const stepKicker = document.querySelector("#stepKicker");
@@ -16,21 +18,39 @@ const technicalOutput = document.querySelector("#technicalOutput");
 const qualificationTables = document.querySelector("#qualificationTables");
 const scoringTables = document.querySelector("#scoringTables");
 const parsedMarkdownOutput = document.querySelector("#parsedMarkdownOutput");
+const contentReviewOutput = document.querySelector("#contentReviewOutput");
+const runContentReviewBtn = document.querySelector("#runContentReviewBtn");
+const contentReviewModel = document.querySelector("#contentReviewModel");
+const contentReviewDeepThinking = document.querySelector("#contentReviewDeepThinking");
 const reanalyzeEditedBtn = document.querySelector("#reanalyzeEditedBtn");
 const parseMethod = document.querySelector("#parseMethod");
+const enableDeepThinking = document.querySelector("#enableDeepThinking");
 const enableFormula = document.querySelector("#enableFormula");
 const enableTable = document.querySelector("#enableTable");
+const llmModel = document.querySelector("#llmModel");
 const viewerModal = document.querySelector("#viewerModal");
 const viewerTitle = document.querySelector("#viewerTitle");
+const viewerRich = document.querySelector("#viewerRich");
 const viewerText = document.querySelector("#viewerText");
+const viewerSaveBtn = document.querySelector("#viewerSaveBtn");
 const viewerCopyBtn = document.querySelector("#viewerCopyBtn");
+let activeViewerTarget = null;
+let parseStartTime = 0;
+let lastAnalysisResult = {};
+let lastParsedSections = [];
 
 const PARSE_METHOD_LABELS = {
+  auto: "智能推荐解析",
   mineru_vlm: "MinerU VLM 模型",
   mineru_pipeline: "MinerU Pipeline 模型",
   mineru_html: "MinerU-HTML 模型",
-  pdfplumber: "pdfplumber 本地 PDF",
-  docx2python: "docx2python 本地 Word"
+  mineru_parallel_pages: "MinerU 并行页段",
+  mineru_local_pipeline: "本地 MinerU Pipeline",
+  pymupdf4llm: "PyMuPDF4LLM 快速 PDF",
+  docling: "Docling 结构化 PDF",
+  pdfplumber: "本地 pdfplumber PDF",
+  docx2python: "本地 docx2python Word",
+  docx2python_image_ocr: "本地 docx2python + RapidOCR Word"
 };
 
 const NOTICE_FIELDS = [
@@ -53,12 +73,22 @@ const NOTICE_BOOLEAN_FIELDS = [
   ["是否为暗标", "是否为暗标"]
 ];
 
+const DEEP_THINKING_MODELS = new Set([
+  "DeepSeek-R1 (Pro)",
+  "Qwen3.6-35B-A3B",
+  "Qwen3-8B (轻量)",
+  "DeepSeek-R1-Distill-Qwen-7B (轻量)"
+]);
+
 chooseFileBtn.addEventListener("click", () => fileInput.click());
 
 parseMethod.addEventListener("change", () => {
   syncMineruOptions();
   refreshSubtitle();
 });
+
+llmModel.addEventListener("change", syncDeepThinkingOption);
+contentReviewModel?.addEventListener("change", syncContentReviewDeepThinkingOption);
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files[0];
@@ -77,7 +107,7 @@ resetBtn.addEventListener("click", () => {
 });
 
 reviewDoneBtn.addEventListener("click", () => {
-  if (!parsedMarkdownOutput.value.trim()) {
+  if (!getTargetText(parsedMarkdownOutput).trim()) {
     statusText.textContent = "请先完成招标文件解析和核对";
     return;
   }
@@ -86,9 +116,9 @@ reviewDoneBtn.addEventListener("click", () => {
   statusText.textContent = "核对完成，已进入标书生成步骤";
 });
 
-reanalyzeEditedBtn.addEventListener("click", async () => {
-  const apiBase = document.querySelector("#apiBase").value.trim().replace(/\/$/, "");
-  const fileContent = parsedMarkdownOutput.value.trim();
+reanalyzeEditedBtn?.addEventListener("click", async () => {
+  const apiBase = getApiBase();
+  const fileContent = getTargetText(parsedMarkdownOutput).trim();
   if (!fileContent) {
     statusText.textContent = "请先在解析原文中保留或填写要分析的内容";
     return;
@@ -98,18 +128,15 @@ reanalyzeEditedBtn.addEventListener("click", async () => {
   showResults();
   clearAnalysisOutputs();
   try {
-    statusText.textContent = "正在检测后端连接...";
-    const healthResponse = await fetchWithTimeout(`${apiBase}/health`, { method: "GET" }, 8000);
-    if (!healthResponse.ok) {
-      throw new Error(`后端服务异常：HTTP ${healthResponse.status}`);
-    }
+    await ensureBackendReady(apiBase);
 
     statusText.textContent = "正在使用修改后的解析内容重新分析...";
     const payload = {
       file_content: fileContent,
       llm_vendor: document.querySelector("#llmVendor").value,
-      llm_model: document.querySelector("#llmModel").value,
-      stream_output: document.querySelector("#streamOutput").value === "true"
+      llm_model: llmModel.value,
+      stream_output: document.querySelector("#streamOutput").value === "true",
+      enable_deep_thinking: isDeepThinkingEnabled()
     };
 
     if (payload.stream_output) {
@@ -138,10 +165,65 @@ reanalyzeEditedBtn.addEventListener("click", async () => {
   } catch (error) {
     const detail = formatErrorDetail(error, apiBase);
     statusText.textContent = "修改内容分析失败，详情已写入结果区";
-    businessOutput.value = detail;
-    technicalOutput.value = detail;
+    renderBusinessContent(detail);
+    renderTechnicalContent(detail);
   } finally {
     setLoading(false);
+  }
+});
+
+runContentReviewBtn?.addEventListener("click", async () => {
+  const apiBase = getApiBase();
+  if (!lastParsedSections.length) {
+    statusText.textContent = "请先完成文件解析，再执行内容审查";
+    renderContentReviewContent("暂无可审查的解析章节。请先上传并解析招标文件。");
+    return;
+  }
+
+  runContentReviewBtn.disabled = true;
+  renderContentReviewContent("正在执行正则内容审查...");
+  try {
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/bid-documents/content-review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sections: lastParsedSections,
+        file_content: sectionsToMarkdown(lastParsedSections),
+        extracted: collectExtractedForReview(),
+        llm_vendor: document.querySelector("#llmVendor").value,
+        llm_model: contentReviewModel?.value || "",
+        enable_deep_thinking: isContentReviewDeepThinkingEnabled()
+      })
+    });
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(text || "后端返回了非 JSON 内容");
+    }
+    if (!response.ok) {
+      throw new Error(
+        typeof data.detail === "string"
+          ? data.detail
+          : JSON.stringify(data.detail || data, null, 2)
+      );
+    }
+    renderContentReviewContent(data.content_review_markdown || "内容审查暂无结果");
+    lastAnalysisResult = {
+      ...lastAnalysisResult,
+      content_review_markdown: data.content_review_markdown || "",
+      content_review_report: data.content_review_report || {}
+    };
+    activateTab("contentReview");
+    statusText.textContent = "内容审查完成";
+  } catch (error) {
+    const detail = formatErrorDetail(error, apiBase);
+    renderContentReviewContent(detail);
+    statusText.textContent = "内容审查失败，详情已写入内容审查区";
+  } finally {
+    runContentReviewBtn.disabled = false;
   }
 });
 
@@ -162,7 +244,7 @@ document.querySelectorAll("[data-copy]").forEach((button) => {
 document.querySelectorAll("[data-expand]").forEach((button) => {
   button.addEventListener("click", () => {
     const target = document.querySelector(`#${button.dataset.expand}`);
-    openViewer(button.dataset.title || "内容查看", getTargetText(target));
+    openViewer(button.dataset.title || "内容查看", getTargetText(target), target);
   });
 });
 
@@ -182,6 +264,14 @@ viewerCopyBtn.addEventListener("click", async () => {
   flashButton(viewerCopyBtn, "已复制");
 });
 
+viewerSaveBtn.addEventListener("click", () => {
+  if (!activeViewerTarget || !("value" in activeViewerTarget)) {
+    return;
+  }
+  activeViewerTarget.value = viewerText.value || "";
+  flashButton(viewerSaveBtn, "已保存");
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeViewer();
@@ -197,15 +287,16 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  const selectedParseMethod = parseMethod.value;
-  const apiBase = document.querySelector("#apiBase").value.trim().replace(/\/$/, "");
+  const selectedParseMethod = resolveClientParseMethod(file, parseMethod.value);
+  const apiBase = getApiBase();
   const formData = new FormData();
   formData.append("file", file);
   formData.append("parse_method", selectedParseMethod);
   formData.append("model_version", getMineruModelVersion(selectedParseMethod));
   formData.append("llm_vendor", document.querySelector("#llmVendor").value);
-  formData.append("llm_model", document.querySelector("#llmModel").value);
+  formData.append("llm_model", llmModel.value);
   formData.append("stream_output", document.querySelector("#streamOutput").value);
+  formData.append("enable_deep_thinking", String(isDeepThinkingEnabled()));
   formData.append("language", document.querySelector("#language").value);
   formData.append("enable_formula", String(enableFormula.checked));
   formData.append("enable_table", String(enableTable.checked));
@@ -219,25 +310,23 @@ form.addEventListener("submit", async (event) => {
   }
 
   setLoading(true);
+  startParseTimer();
   showResults();
+  lastAnalysisResult = {};
+  lastParsedSections = [];
   setOutputs({
     project_overview: `正在使用 ${PARSE_METHOD_LABELS[selectedParseMethod]} 解析文件，并提取五大模块...`,
     technical_scoring_requirements: "等待 LLM 提取技术要求...",
+    business_content: "等待 LLM 提取商务内容...",
     qualification_compliance_requirements: "",
-    price_scoring_requirements: ""
+    price_scoring_requirements: "",
+    image_analysis_markdown: "图片解析等待中...",
+    content_review_markdown: "内容审查尚未执行。五大模块提取完成后，可点击“执行审查”。"
   });
+  renderParseQuality(null);
 
   try {
-    if (window.backend?.ensure) {
-      statusText.textContent = "正在确认后端服务...";
-      await window.backend.ensure(apiBase);
-    }
-
-    statusText.textContent = "正在检测后端连接...";
-    const healthResponse = await fetchWithTimeout(`${apiBase}/health`, { method: "GET" }, 8000);
-    if (!healthResponse.ok) {
-      throw new Error(`后端服务异常：HTTP ${healthResponse.status}`);
-    }
+    await ensureBackendReady(apiBase);
 
     statusText.textContent = "后端连接正常，正在上传并解析...";
     if (document.querySelector("#streamOutput").value === "true") {
@@ -268,16 +357,26 @@ form.addEventListener("submit", async (event) => {
       setWorkflowStep(2);
       activateTab("parsed");
       statusText.textContent = "文件解析和五大模块提取完成";
+      finishParseTimer();
     }
   } catch (error) {
+    finishParseTimer();
     const detail = formatErrorDetail(error, apiBase);
     showResults();
-    statusText.textContent = "处理失败，详情已写入结果区";
-    renderNotice(`其他关键要求：${detail}`);
-    businessOutput.value = detail;
-    technicalOutput.value = detail;
-    renderQualification("");
-    renderScoring("");
+    if (lastParsedSections.length) {
+      setWorkflowStep(2);
+      activateTab("parsed");
+      setParsedSections(lastParsedSections);
+      statusText.textContent = "文件解析已完成，但后续分析失败，详情已写入商务内容区";
+      renderBusinessContent(detail);
+    } else {
+      statusText.textContent = "处理失败，详情已写入结果区";
+      renderNotice(`其他关键要求：${detail}`);
+      renderBusinessContent(detail);
+      renderTechnicalContent(detail);
+      renderQualification("");
+      renderScoring("");
+    }
   } finally {
     setLoading(false);
   }
@@ -290,6 +389,66 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function getApiBase() {
+  const input = document.querySelector("#apiBase");
+  const value = input?.value?.trim() || "http://127.0.0.1:8000";
+  const normalized = value.replace(/\/$/, "");
+  if (!/^https?:\/\//i.test(normalized)) {
+    return `http://${normalized}`;
+  }
+  return normalized;
+}
+
+async function ensureBackendReady(apiBase) {
+  let diagnoseResult = null;
+  const hasElectronBackend = Boolean(window.backend?.ensure);
+  try {
+    if (hasElectronBackend) {
+      statusText.textContent = "正在确认后端服务...";
+      await window.backend.ensure(apiBase);
+    } else {
+      statusText.textContent = "正在检测后端连接...";
+    }
+
+    statusText.textContent = "正在检测后端连接...";
+    const healthResponse = await fetchWithTimeout(`${apiBase}/health`, { method: "GET" }, 12000);
+    if (!healthResponse.ok) {
+      throw new Error(`后端服务异常：HTTP ${healthResponse.status}`);
+    }
+  } catch (error) {
+    if (window.backend?.diagnose) {
+      try {
+        diagnoseResult = await window.backend.diagnose(apiBase);
+      } catch (diagnoseError) {
+        diagnoseResult = {
+          error: diagnoseError?.message || String(diagnoseError)
+        };
+      }
+    }
+
+    const logs = Array.isArray(diagnoseResult?.logs)
+      ? diagnoseResult.logs.slice(-20).join("\n")
+      : "";
+    const hint = hasElectronBackend
+      ? "Electron 会自动尝试启动 FastAPI；如果仍失败，优先查看下方端口、后端目录和最近日志。"
+      : "当前页面没有检测到 Electron 后端桥接，无法自动启动 FastAPI。请用 npm start 启动桌面端，或先手动启动后端。";
+    throw new Error(JSON.stringify({
+      detail: {
+        type: "后端自动检查失败",
+        message: error?.message || String(error),
+        hint,
+        port: diagnoseResult?.port,
+        healthy: diagnoseResult?.healthy,
+        backend_dir: diagnoseResult?.backendDir,
+        owned_process: diagnoseResult?.ownedProcess,
+        electron_bridge: hasElectronBackend,
+        diagnose_error: diagnoseResult?.error,
+        logs
+      }
+    }, null, 2));
   }
 }
 
@@ -308,6 +467,7 @@ async function runStreamingAnalyze(apiBase, formData) {
   const reader = response.body.getReader();
   const buffers = {
     project_overview: "",
+    business_content: "",
     technical_scoring_requirements: "",
     qualification_compliance_requirements: "",
     price_scoring_requirements: ""
@@ -350,6 +510,7 @@ async function runStreamingEditedAnalyze(apiBase, payload) {
   const reader = response.body.getReader();
   const buffers = {
     project_overview: "",
+    business_content: "",
     technical_scoring_requirements: "",
     qualification_compliance_requirements: "",
     price_scoring_requirements: ""
@@ -383,8 +544,27 @@ function handleStreamEvent(event, buffers) {
   }
 
   if (event.type === "parsed") {
+    if (Array.isArray(event.sections)) {
+      lastParsedSections = event.sections;
+      setParsedSections(event.sections);
+    }
+    if (event.parse_method_used) {
+      fileName.textContent = `实际解析方案：${PARSE_METHOD_LABELS[event.parse_method_used] || event.parse_method_used}`;
+    }
     statusText.textContent = event.message || "文件解析完成，正在调用大模型...";
-    setParsedSections(event.sections || []);
+    return;
+  }
+
+  if (event.type === "image_analysis") {
+    renderParseQuality(event.parse_quality || null);
+    setImageAnalysisDisplay(event.content || "未提取到图片。", event.items || []);
+    statusText.textContent = event.message || "图片解析完成";
+    return;
+  }
+
+  if (event.type === "content_review") {
+    renderContentReviewContent(event.content || "内容审查暂无结果");
+    statusText.textContent = event.message || "内容审查完成";
     return;
   }
 
@@ -403,9 +583,14 @@ function handleStreamEvent(event, buffers) {
 
   if (event.type === "done") {
     setOutputs(event.result || buffers);
+    lastAnalysisResult = { ...(event.result || buffers) };
+    if (Array.isArray(event.result?.sections)) {
+      lastParsedSections = event.result.sections;
+    }
     setWorkflowStep(2);
     activateTab("parsed");
     statusText.textContent = event.message || "全部分析完成";
+    finishParseTimer();
     return;
   }
 
@@ -414,15 +599,46 @@ function handleStreamEvent(event, buffers) {
   }
 }
 
+function startParseTimer() {
+  parseStartTime = performance.now();
+  if (parseDuration) {
+    parseDuration.textContent = "用时：--";
+    parseDuration.classList.add("hidden");
+  }
+}
+
+function finishParseTimer() {
+  if (!parseStartTime || !parseDuration) {
+    return;
+  }
+  const seconds = Math.max(0, Math.round((performance.now() - parseStartTime) / 1000));
+  parseDuration.textContent = `用时：${formatDuration(seconds)}`;
+  parseDuration.classList.remove("hidden");
+  parseStartTime = 0;
+}
+
+function formatDuration(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}秒`;
+  }
+  return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+}
+
 function updateStreamingField(field, value) {
   if (field === "project_overview") {
     renderNotice(value);
+  } else if (field === "business_content") {
+    renderBusinessContent(value);
   } else if (field === "technical_scoring_requirements") {
-    technicalOutput.value = value;
+    renderTechnicalContent(value);
   } else if (field === "qualification_compliance_requirements") {
     renderQualification(value);
   } else if (field === "price_scoring_requirements") {
     renderScoring(value);
+  } else if (field === "content_review_markdown") {
+    renderContentReviewContent(value);
   }
 }
 
@@ -474,7 +690,8 @@ function setParsedSections(sections) {
   if (!parsedMarkdownOutput) {
     return;
   }
-  parsedMarkdownOutput.value = sectionsToMarkdown(sections);
+  lastParsedSections = Array.isArray(sections) ? sections : [];
+  setImageAnalysisDisplay(sectionsToMarkdown(sections));
 }
 
 function sectionsToMarkdown(sections) {
@@ -484,12 +701,77 @@ function sectionsToMarkdown(sections) {
     .join("\n\n");
 }
 
+function collectExtractedForReview() {
+  return {
+    ...lastAnalysisResult,
+    project_overview: getTargetText(noticeFields),
+    business_content: getTargetText(businessOutput),
+    technical_scoring_requirements: getTargetText(technicalOutput),
+    qualification_compliance_requirements: getTargetText(qualificationTables),
+    price_scoring_requirements: getTargetText(scoringTables)
+  };
+}
+
+function setImageAnalysisDisplay(markdown = "", items = []) {
+  if (!parsedMarkdownOutput) {
+    return;
+  }
+  parsedMarkdownOutput.dataset.rawText = markdown || "";
+  parsedMarkdownOutput.innerHTML = "";
+
+  if (items.length) {
+    items.forEach((item) => {
+      const card = document.createElement("article");
+      card.className = "image-analysis-card";
+
+      const image = document.createElement("img");
+      image.src = item.image_data_url || "";
+      image.alt = `图片 ${item.index || ""}`;
+      image.loading = "lazy";
+
+      const body = document.createElement("div");
+      body.className = "image-analysis-body";
+      body.innerHTML = `
+        <h4>图片 ${escapeHtml(String(item.index || ""))}</h4>
+        <p>文件：${escapeHtml(item.file_name || "")}</p>
+        <section>
+          <strong>OCR文本</strong>
+          <pre>${escapeHtml(item.ocr_text || "未识别到文字。")}</pre>
+        </section>
+        <section>
+          <strong>AI备注</strong>
+          <pre>${escapeHtml(item.ai_note || "未生成备注。")}</pre>
+        </section>
+      `;
+
+      card.append(image, body);
+      parsedMarkdownOutput.appendChild(card);
+    });
+    return;
+  }
+
+  const pre = document.createElement("pre");
+  pre.className = "image-analysis-empty";
+  pre.textContent = markdown || "未提取到图片。";
+  parsedMarkdownOutput.appendChild(pre);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function clearAnalysisOutputs() {
   renderNotice("");
-  businessOutput.value = "";
-  technicalOutput.value = "暂无结果";
+  renderBusinessContent("");
+  renderTechnicalContent("暂无结果");
   renderQualification("");
   renderScoring("");
+  renderContentReviewContent("内容审查尚未执行。五大模块提取完成后，可点击“执行审查”。");
 }
 
 function formatErrorDetail(error, apiBase) {
@@ -497,6 +779,7 @@ function formatErrorDetail(error, apiBase) {
   let message = raw;
   let type = "前端请求失败";
   let hint = "先确认后端是否启动、端口是否正确，再检查 MinerU 和大模型 API 的网络连接。";
+  const extraLines = [];
 
   try {
     const parsed = JSON.parse(raw);
@@ -504,9 +787,33 @@ function formatErrorDetail(error, apiBase) {
     if (typeof detail === "string") {
       message = detail;
     } else {
-      type = detail.type || type;
+      type = detail.error_type || detail.type || type;
       message = detail.message || message;
       hint = detail.hint || hint;
+      if (detail.port) {
+        extraLines.push(`端口：${detail.port}`);
+      }
+      if (typeof detail.healthy === "boolean") {
+        extraLines.push(`健康检查：${detail.healthy ? "通过" : "未通过"}`);
+      }
+      if (detail.backend_dir) {
+        extraLines.push(`后端目录：${detail.backend_dir}`);
+      }
+      if (typeof detail.owned_process === "boolean") {
+        extraLines.push(`Electron 托管后端进程：${detail.owned_process ? "是" : "否"}`);
+      }
+      if (typeof detail.electron_bridge === "boolean") {
+        extraLines.push(`Electron 自动启动桥接：${detail.electron_bridge ? "可用" : "不可用"}`);
+      }
+      if (detail.diagnose_error) {
+        extraLines.push(`诊断接口错误：${detail.diagnose_error}`);
+      }
+      if (detail.logs) {
+        extraLines.push("", "最近后端日志：", detail.logs);
+      }
+      if (detail.traceback) {
+        extraLines.push("", "后端 traceback 摘要：", detail.traceback);
+      }
     }
   } catch {
     if (raw.includes("Failed to fetch")) {
@@ -515,7 +822,7 @@ function formatErrorDetail(error, apiBase) {
       hint = "检查后端地址和端口是否正确；如果改了端口，要确保 FastAPI 也启动在同一个端口。";
     } else if (raw.includes("aborted") || raw.includes("AbortError")) {
       type = "连接检测超时";
-      message = `8 秒内没有连上 ${apiBase}/health`;
+      message = `12 秒内没有连上 ${apiBase}/health`;
       hint = "后端可能没启动，或端口被占用，或本机防火墙/代理拦截。";
     }
   }
@@ -524,6 +831,7 @@ function formatErrorDetail(error, apiBase) {
     `错误类型：${type}`,
     `错误信息：${message}`,
     `排查建议：${hint}`,
+    ...(extraLines.length ? ["", ...extraLines] : []),
     "",
     "建议排查顺序：",
     "1. 浏览器打开后端地址加 /health，例如 http://127.0.0.1:8000/health，应该返回 {\"status\":\"ok\"}。",
@@ -534,8 +842,15 @@ function formatErrorDetail(error, apiBase) {
   ].join("\n");
 }
 
+function resolveClientParseMethod(file, selectedParseMethod) {
+  return selectedParseMethod || "auto";
+}
+
 function getMineruModelVersion(selectedParseMethod) {
   if (selectedParseMethod === "mineru_pipeline") {
+    return "pipeline";
+  }
+  if (selectedParseMethod === "mineru_local_pipeline") {
     return "pipeline";
   }
   if (selectedParseMethod === "mineru_html") {
@@ -545,11 +860,56 @@ function getMineruModelVersion(selectedParseMethod) {
 }
 
 function syncMineruOptions() {
-  const supportsOptions = parseMethod.value === "mineru_vlm" || parseMethod.value === "mineru_pipeline";
+  const supportsOptions =
+    parseMethod.value === "mineru_vlm" ||
+    parseMethod.value === "mineru_pipeline" ||
+    parseMethod.value === "mineru_parallel_pages" ||
+    parseMethod.value === "mineru_local_pipeline";
   enableFormula.disabled = !supportsOptions;
   enableTable.disabled = !supportsOptions;
   enableFormula.closest(".check-item").classList.toggle("disabled", !supportsOptions);
   enableTable.closest(".check-item").classList.toggle("disabled", !supportsOptions);
+}
+
+function syncDeepThinkingOption() {
+  const supported = DEEP_THINKING_MODELS.has(llmModel.value);
+  enableDeepThinking.disabled = !supported;
+  const wrapper = enableDeepThinking.closest(".inline-check, .check-item");
+  wrapper.classList.toggle("disabled", !supported);
+  wrapper.title = supported
+    ? "开启后会要求大模型进行更充分的内部分析，速度可能变慢"
+    : "当前模型不支持深度思考";
+  if (!supported) {
+    enableDeepThinking.checked = false;
+  }
+}
+
+function syncContentReviewDeepThinkingOption() {
+  if (!contentReviewModel || !contentReviewDeepThinking) {
+    return;
+  }
+  const supported = DEEP_THINKING_MODELS.has(contentReviewModel.value);
+  contentReviewDeepThinking.disabled = !supported;
+  const wrapper = contentReviewDeepThinking.closest(".inline-check, .check-item");
+  wrapper?.classList.toggle("disabled", !supported);
+  wrapper.title = supported
+    ? "内容审查将使用该模型进行更充分的复核，速度可能变慢"
+    : "当前审查模型不支持深度思考";
+  if (!supported) {
+    contentReviewDeepThinking.checked = false;
+  }
+}
+
+function isDeepThinkingEnabled() {
+  return !enableDeepThinking.disabled && enableDeepThinking.checked;
+}
+
+function isContentReviewDeepThinkingEnabled() {
+  return Boolean(
+    contentReviewDeepThinking &&
+      !contentReviewDeepThinking.disabled &&
+      contentReviewDeepThinking.checked
+  );
 }
 
 function refreshSubtitle() {
@@ -570,14 +930,52 @@ function setLoading(isLoading) {
 }
 
 function setOutputs(data) {
+  lastAnalysisResult = { ...(data || {}) };
+  if (Array.isArray(data.sections)) {
+    lastParsedSections = data.sections;
+  }
   renderNotice(data.project_overview || "");
-  businessOutput.value = data.business_content || "";
-  technicalOutput.value = data.technical_requirements || data.technical_scoring_requirements || "暂无结果";
+  renderBusinessContent(data.business_content || "");
+  renderTechnicalContent(data.technical_requirements || data.technical_scoring_requirements || "暂无结果");
   renderQualification(data.qualification_compliance_requirements || "");
   renderScoring(data.scoring_requirements || data.price_scoring_requirements || "");
-  if (data.sections) {
-    setParsedSections(data.sections);
+  setImageAnalysisDisplay(data.image_analysis_markdown || "未提取到图片。", data.image_analysis_items || []);
+  renderContentReviewContent(data.content_review_markdown || data.content_review_report?.markdown || "内容审查尚未执行。五大模块提取完成后，可点击“执行审查”。");
+  renderParseQuality(data.parse_quality || null);
+  if (data.parse_method_used) {
+    fileName.textContent = `实际解析方案：${PARSE_METHOD_LABELS[data.parse_method_used] || data.parse_method_used}`;
   }
+}
+
+function renderParseQuality(quality) {
+  if (!parseQuality) {
+    return;
+  }
+  if (!quality) {
+    parseQuality.classList.add("hidden");
+    parseQuality.innerHTML = "";
+    return;
+  }
+
+  const warnings = Array.isArray(quality.warnings) && quality.warnings.length
+    ? `｜提示：${quality.warnings[0]}`
+    : "";
+  const profile = quality.preflight_profile || {};
+  const pdfType = profile.pdf_type_label ? `<span>PDF类型：${escapeHtml(profile.pdf_type_label)}</span>` : "";
+  const parseLayers = Array.isArray(profile.parse_layers) && profile.parse_layers.length
+    ? `<span>${escapeHtml(profile.parse_layers.join(" / "))}</span>`
+    : "";
+  parseQuality.innerHTML = `
+    <span>解析质量：${escapeHtml(quality.level || "未知")}</span>
+    <span>正文：${escapeHtml(String(quality.text_chars || 0))} 字</span>
+    <span>章节：${escapeHtml(String(quality.section_count || 0))}</span>
+    <span>图片：${escapeHtml(String(quality.image_count || 0))}</span>
+    <span>OCR：${escapeHtml(String(quality.image_ocr_chars || 0))} 字</span>
+    ${pdfType}
+    ${parseLayers}
+    <span>方案：${escapeHtml(quality.parse_method_label || quality.parse_method_used || "")}${escapeHtml(warnings)}</span>
+  `;
+  parseQuality.classList.remove("hidden");
 }
 
 function renderNotice(text) {
@@ -645,15 +1043,92 @@ function renderScoring(text) {
   renderSelectableTables(scoringTables, text, [
     {
       title: "商务评分",
-      aliases: ["商务评分", "商务分", "商务部分"],
+      aliases: ["商务评分", "商务分", "商务部分", "商务评审", "商务评价", "资信评分", "资信部分", "资信评审", "企业实力", "类似业绩", "项目业绩"],
       headers: ["评分项", "评分标准", "分数"]
     },
     {
       title: "技术评分",
-      aliases: ["技术评分", "技术分", "技术部分"],
+      aliases: ["技术评分", "技术分", "技术部分", "技术评审", "技术评价", "技术方案", "实施方案", "服务方案", "详细评审", "综合评分"],
       headers: ["评分项", "评分标准", "分数"]
     }
   ]);
+}
+
+function renderBusinessContent(text) {
+  const raw = String(text || "");
+  businessOutput.dataset.rawText = raw;
+  businessOutput.innerHTML = renderSimpleMarkdown(raw || "暂无结果");
+}
+
+function renderTechnicalContent(text) {
+  const raw = String(text || "");
+  technicalOutput.dataset.rawText = raw;
+  technicalOutput.innerHTML = renderSimpleMarkdown(raw || "暂无结果");
+}
+
+function renderContentReviewContent(text) {
+  const raw = String(text || "");
+  contentReviewOutput.dataset.rawText = raw;
+  contentReviewOutput.innerHTML = renderSimpleMarkdown(raw || "内容审查暂无结果");
+}
+
+function renderSimpleMarkdown(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const html = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+
+    const tableLines = [];
+    while (
+      index < lines.length &&
+      lines[index].trim().startsWith("|") &&
+      lines[index].trim().endsWith("|")
+    ) {
+      tableLines.push(lines[index].trim());
+      index += 1;
+    }
+    if (tableLines.length) {
+      index -= 1;
+      html.push(renderMarkdownTableHtml(tableLines));
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(4, heading[1].length + 2);
+      html.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    html.push(`<p>${escapeHtml(line)}</p>`);
+  }
+  return html.join("");
+}
+
+function renderMarkdownTableHtml(tableLines) {
+  const rows = tableLines
+    .filter((line) => !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line))
+    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
+  if (!rows.length) {
+    return "";
+  }
+
+  const [headers, ...bodyRows] = rows;
+  const headCells = headers.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("");
+  const bodyCells = (bodyRows.length ? bodyRows : [["未提及", ""]])
+    .map((row) => `<tr>${headers.map((_, index) => `<td>${escapeHtml(row[index] || "")}</td>`).join("")}</tr>`)
+    .join("");
+  return `
+    <div class="readonly-table-wrap business-table-wrap">
+      <table class="readonly-table business-table">
+        <thead><tr>${headCells}</tr></thead>
+        <tbody>${bodyCells}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderSelectableTables(container, text, modules) {
@@ -810,20 +1285,29 @@ function showResults() {
 }
 
 function resetView() {
+  lastAnalysisResult = {};
+  lastParsedSections = [];
   setWorkflowStep(1);
   activateTab("notice");
   statusText.textContent = "等待上传";
+  renderParseQuality(null);
+  if (parseDuration) {
+    parseDuration.textContent = "用时：--";
+    parseDuration.classList.add("hidden");
+  }
+  parseStartTime = 0;
   submitBtn.classList.remove("ready");
   submitBtn.disabled = false;
   submitBtn.textContent = "下一步";
   contentCard.classList.remove("has-result");
   renderNotice("");
-  businessOutput.value = "";
-  technicalOutput.value = "暂无结果";
-  parsedMarkdownOutput.value = "";
+  renderBusinessContent("");
+  renderTechnicalContent("暂无结果");
+  setImageAnalysisDisplay("");
   renderQualification("");
   renderScoring("");
   syncMineruOptions();
+  syncDeepThinkingOption();
 }
 
 function getTargetText(target) {
@@ -832,6 +1316,12 @@ function getTargetText(target) {
   }
   if ("value" in target) {
     return target.value;
+  }
+  if (target.dataset?.rawText) {
+    return target.dataset.rawText;
+  }
+  if (target.id === "parsedMarkdownOutput" && target.dataset.rawText) {
+    return target.dataset.rawText;
   }
   if (target.id === "noticeFields") {
     return serializeNoticeFields();
@@ -869,17 +1359,50 @@ function serializeReadonlyTables(container) {
   return parts.join("\n");
 }
 
-function openViewer(title, text) {
+function openViewer(title, text, target = null) {
+  activeViewerTarget = target && "value" in target && !target.readOnly ? target : null;
   viewerTitle.textContent = title;
   viewerText.value = text || "暂无内容";
+  const richHtml = buildViewerHtml(target, text);
+  if (richHtml) {
+    viewerRich.innerHTML = richHtml;
+    viewerRich.hidden = false;
+    viewerText.hidden = true;
+  } else {
+    viewerRich.innerHTML = "";
+    viewerRich.hidden = true;
+    viewerText.hidden = false;
+  }
+  viewerText.readOnly = !activeViewerTarget || Boolean(richHtml);
+  viewerSaveBtn.classList.toggle("hidden", !activeViewerTarget);
   viewerModal.classList.add("open");
   viewerModal.setAttribute("aria-hidden", "false");
-  setTimeout(() => viewerText.focus(), 0);
+  setTimeout(() => (richHtml ? viewerRich.focus() : viewerText.focus()), 0);
 }
 
 function closeViewer() {
+  activeViewerTarget = null;
+  viewerRich.innerHTML = "";
+  viewerRich.hidden = true;
+  viewerText.hidden = false;
   viewerModal.classList.remove("open");
   viewerModal.setAttribute("aria-hidden", "true");
+}
+
+function buildViewerHtml(target, text) {
+  if (!target) {
+    return "";
+  }
+  if (target.id === "parsedMarkdownOutput") {
+    return target.innerHTML || renderSimpleMarkdown(text || "");
+  }
+  if (target.id === "qualificationTables" || target.id === "scoringTables") {
+    return renderSimpleMarkdown(text || "");
+  }
+  if (target.classList?.contains("markdown-output")) {
+    return renderSimpleMarkdown(text || "");
+  }
+  return "";
 }
 
 function exportText(fileName, text) {
@@ -903,4 +1426,6 @@ function flashButton(button, text) {
 }
 
 syncMineruOptions();
+syncDeepThinkingOption();
+syncContentReviewDeepThinkingOption();
 resetView();

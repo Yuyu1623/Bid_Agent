@@ -5,5 +5,6 @@ contextBridge.exposeInMainWorld("appInfo", {
 });
 
 contextBridge.exposeInMainWorld("backend", {
-  ensure: (apiBase) => ipcRenderer.invoke("backend:ensure", apiBase)
+  ensure: (apiBase) => ipcRenderer.invoke("backend:ensure", apiBase),
+  diagnose: (apiBase) => ipcRenderer.invoke("backend:diagnose", apiBase)
 });
