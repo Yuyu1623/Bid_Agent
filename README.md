@@ -10,13 +10,23 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 
 ```text
 1. 文件解析层 `[已完成基础版，持续增强中]`
+   ** 核心目标：减少人工判断环节，增强混合文档的自动兜底能力，并提前引入结构化的视角。 ** 
    -> 读懂招标文件、投标文件、合同、附件
    -> 支持 PDF、Word、图片、HTML 等格式
    -> 识别原生文本、扫描件、图文混排、表格、图片和页段结构
 
 2. 结构化抽取层 `[已完成基础版，持续增强中]`
-   -> 先按宽关键词和章节标题召回候选片段，减少每个模块重复读取全文
-   -> 五路并发调用大模型，分别抽取投标人须知、商务内容、技术要求、资格审查、评分要求
+   ** 核心目标：能不能用原子化输出确保下游可用，解决能不能抽出来，抽出来准不准，全不全的问题 **
+   -> 第一次先调用大模型，只生成全局 project_profile 和全文 section_tree，统一项目名称、编号、预算、招标人、代理机构、采购方式、分包等基础字段，section_tree 记录章节标题、层级、起始位置/页码、标题路径和模块线索，作为后续专项抽取的结构锚点
+   -> 专项抽取阶段带着 project_profile 和 section_tree 作为上下文，并要求模型不得修改项目基本信息，只能从指定候选章节范围内提取
+   -> 商务内容、技术要求、资格审查、评分要求四路并发调用大模型，减少项目基础字段冲突
+   -> 资格审查 / 废标项增加轻量模型逐章预筛：先标出疑似资格、符合性审查、废标/否决投标段落，再并入资格审查精提取上下文，提升全覆盖率以及召回率
+   -> 专项抽取默认使用 JSON Schema 结构化输出，强制每个原子条目带 source_chunk_id、source_text、source_heading 和 evidence_snippet，便于溯源、人工复核和 golden evidence 测试
+   -> 风险等级、状态、评分类型、废标法律性质等字段使用 enum 约束，如风险等级统一为“高/中/低/未明确”，废标法律性质统一为“资格性/符合性/响应性/其他”
+   -> 入库时补充标准化 metadata：金额尽量统一为“数字 + CNY”，期限尽量统一为日历天数，日期尽量统一为 ISO 日期
+   -> 入库时构建跨模块引用：商务要求会根据 source_chunk_id 和关键词相似度关联相关技术要求、评分项，写入 related_tech_requirement_ids 和 related_scoring_item_ids
+   -> 候选片段召回从“规则匹配”升级为“宽关键词 + 章节标题 + 模块语义 query + 规则重排”的混合检索基础版；后续可接 chunk_embeddings、Chroma / FAISS / Qdrant 做真正向量召回和双向排序
+   -> Prompt 要求按“一个要求 / 一个材料 / 一个评分点一行”的原子粒度输出，减少长段堆叠和复读
    -> 投标人须知清洗为 project_profile，并同步项目名称、编号、预算、招标人、代理机构等项目主字段
    -> 商务内容清洗为 business_requirements，按表格行或 Markdown 小点拆成独立条款，覆盖报价、合同、付款、交付、验收、保证金、售后等条款
    -> 技术要求清洗为 technical_requirements，按标题层级和列表小点拆成独立要求，覆盖技术参数、服务要求、实施要求、验收标准
@@ -26,9 +36,13 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
    -> 内容审查结果清洗为 review_findings，保留风险、缺失项、建议和待处理状态
    -> 解析后的章节写入 document_sections，语义切片写入 document_chunks
    -> document_chunks 不按整章粗切，而是优先按 Markdown 表格行、列表小点、业务条款和段落块切成 RAG 最小语义单元
+   -> 表格切片会记录 header_paths 和 cell_header_map，尽量保留两层表头、合并单元格附近的表头语义
+   -> document_chunks 的 metadata 统一携带 hierarchy_path、item_type、parent_table_header、importance_score、module 和 vector_filter，便于后续向量检索按章节、模块、表格行等条件过滤
+   -> 每个章节会额外生成“章节摘要”chunk，作为 section_summary / module aggregate 的向量入口，后续可根据引用频率或人工反馈动态调整 importance_score
    -> 当前已完成 SQLite 基础入库；向量索引通过 chunk_embeddings 预留映射，后续接 Chroma / FAISS / Qdrant
 
 3. 知识沉淀层 `[SQLite 基础版完成，向量检索规划中]`
+   ** 核心目标：将解析后的结构化信息（如条款、评分点）与原始文档的语义切片（document_chunks）持久化、标准化，并建立起可追溯、可检索、可进化的一套知识基底。
    -> 建立企业内部数据库，包括公司信息、资质管理、人员信息、财务信息、业绩信息、历史投标文件
    -> 建立项目表，沉淀项目名称、编号、预算、招标人、代理机构、时间节点
    -> 建立规则库，沉淀资格规则、评分规则、废标规则、响应规则
@@ -69,21 +83,42 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
   -> 智能解析两层处理
       -> 第一层：解析层
           -> 判断 PDF 类型：原生文本 PDF / 扫描件 PDF / 图文混排 PDF
-          -> 原生文本 PDF：pdfplumber 稳定文本抽取
-          -> 原生复杂 PDF：可手动选择 PyMuPDF4LLM / Docling 试验增强解析
+          -> 极简纯文本 PDF：pdfplumber 轻量文本抽取
+          -> 原生复杂 PDF：统一优先走 MinerU Pipeline / MinerU 并行页段
           -> 扫描件 PDF：OCR / MinerU VLM
-          -> 图文混排 PDF：MinerU 多模态 / MinerU 并行页段
-          -> Word：docx2python / python-docx / 图片 OCR
+          -> 图文混排 PDF：MinerU VLM / MinerU 并行页段
+          -> Word：docx2python / python-docx，DOCX 图片提取位置、OCR 和签章/签字线索
       -> 第二层：结构还原层
           -> 尽量保留页码、标题层级、章节、段落、表格、图片说明、页眉页脚线索
-  -> Markdown / 页段 / 章节结构化
-  -> 宽关键词检索候选片段
-  -> 大模型五路并发分析
-      -> 投标人须知
-      -> 商务内容
-      -> 技术要求
-      -> 资格审查
-      -> 评分要求
+          -> 基于 Markdown 标题、font-size/bold 线索、编号模式（一、/ 1. / 1.1）重建标题层级树
+  -> 统一中间格式
+      -> Markdown 正文
+      -> 结构化元数据：标题路径、表格 JSON、图片描述、页码线索
+      -> DOCX 图片元数据挂到相邻章节，而不是孤立输出
+      -> 表格行切片保留 header_paths / cell_header_map，避免两层表头和表内分段丢失语义
+      -> document_chunks metadata 保留 hierarchy_path、item_type、parent_table_header、importance_score 和 vector_filter
+      -> 章节摘要 chunk 作为后续章节级 / 模块级向量检索入口
+  -> 模块候选片段召回
+      -> 宽关键词召回
+      -> 模块语义 query 召回，如商务要求使用“付款方式、合同价款、履约保证金、质保金、发票要求”等查询描述
+      -> 标题命中加权
+      -> 表格 / 列表 / 数值线索加权
+      -> 负向噪声扣分
+      -> Top 候选截断
+  -> 大模型两阶段分析
+      -> 第 0 步：生成 project_profile 和全文 section_tree
+      -> 第 1 步：商务内容、技术要求、资格审查、评分要求四路专项并发
+      -> 专项 Prompt 携带 project_profile 和 section_tree，并禁止改写项目基本信息
+      -> 资格审查专项前，后台自动调用轻量模型逐章预筛“疑似资格审查 / 符合性审查 / 废标或否决投标”段落
+      -> 专项模块默认按 JSON Schema 输出结构化对象，再转换为 Markdown 表格展示
+      -> 每个原子对象强制携带 source_chunk_id 和 source_text，风险等级、状态、评分类型、废标法律性质等字段使用 enum 归一化
+  -> 输出质量后处理
+      -> 表格行去重
+      -> 句子 / 小点去重
+      -> 《材料名称》去重
+      -> 金额、时间、日期标准化写入 metadata
+      -> 商务要求与技术要求、评分项建立跨模块引用
+      -> 原子条目拆分后入库
   -> 正则与关键词辅助校验 / 评分上下文筛选
   -> 内容审查智能体
       -> 正则检查各模块关键字段覆盖率
@@ -104,22 +139,29 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 - 支持 MinerU VLM、MinerU Pipeline、MinerU-HTML
 - 支持长 PDF / 含图 PDF 使用 MinerU 并行页段解析
 - 支持本地 MinerU Pipeline
-- `auto` 默认使用 `pdfplumber` 作为原生 PDF 稳定路线，并尽量还原页码、段落和 Markdown 表格
+- `auto` 仅对无图、无表、页数较少、文本层稳定的极简纯文本 PDF 使用 `pdfplumber`
+- 非极简纯文本的原生 PDF 默认优先使用 MinerU Pipeline；扫描件、图文混排和多模态内容优先使用 MinerU VLM 或 MinerU 并行页段
 - 支持 `docx2python`、`python-docx` Word 解析
+- 支持 DOCX 图片位置提取，记录图片位于哪个段落或表格单元格附近，并通过 OCR 和启发式规则识别公章、签字、图表等线索
 - 支持 PDF / DOCX 图片提取和 OCR，使用 RapidOCR / Tesseract 作为本地补充
 - 支持大模型流式输出和非流式输出
-- 支持五个大模型分析任务并发执行
-- 支持五个模块先按宽关键词/章节标题召回候选片段，再交给大模型提取，减少全文重复输入
+- 支持大模型两阶段抽取：先生成 project_profile 和 section_tree，再并发执行四个专项抽取任务
+- 支持专项抽取携带全局项目画像和章节树，要求模型不得改写项目基础字段，只能从指定候选章节范围内提取
+- 支持五个模块先按宽关键词、章节标题和模块语义 query 召回候选片段，再通过规则重排、标题加权、噪声扣分和 Top 候选截断后交给大模型提取，减少全文重复输入和噪声干扰
+- 支持面向小模型的 Prompt 收紧：要求按原子粒度输出，一个要求、材料或评分点尽量单独一行
 - 支持大模型提取结果后处理去重，会按表格行、句子、小点和《材料名称》识别重复内容，减少复读和冗余入库
+- 解析结果统一为 Markdown + 结构化元数据，章节元数据包括标题路径、表格 JSON、图片 JSON 和页码线索
 - 支持修改解析后的内容并重新分析
 - 知识库前端基础版已完成，支持公司信息、资质管理、人员信息、财务信息、业绩信息、历史案例库、历史投标文件和方案素材库八类知识资产录入
 - 知识库支持本地保存、搜索、新建、编辑、删除、JSON 导入和 JSON 导出
 - 项目库基础版已完成，支持查看 SQLite 中的项目列表、来源文件、章节、切片、项目概览、商务要求、技术要求、资格审查、废标项、评分项和审查发现
-- 项目库支持对结构化记录进行人工确认，状态可切换为未确认、已确认或需复核
+- 项目库定位为结构化结果展示页，不再要求用户逐条确认
 - 项目库支持删除整个项目，或删除单条结构化记录，便于清理测试数据和错误抽取项
 - Electron 客户端支持自动启动 FastAPI 后端，并通过 `/health` 做端口连通性检查
 - 后端连接失败时，前端会显示端口、后端目录、健康检查结果和最近启动日志，便于定位依赖、端口占用或 Python 启动问题
 - 前端按五大模块展示：投标人须知、商务内容、技术要求、资格审查、评分要求
+- 投标人须知中的“各种时间安排”会汇总网上报名、获取文件、澄清答疑、投标截止、开标、保证金、项目实施/交付/服务等时间节点
+- 投标人须知支持按钮项：是否专门面向中小微企业采购、是否为暗标、是否允许代理商投标、是否允许联合体投标；原文未提及或无法判断时默认“否”
 - 资格审查支持资格性审查、符合性审查、废标项切换查看
 - 评分要求支持商务评分、技术评分切换查看
 - 商务内容、技术要求、内容审查统一使用 Markdown 展示区，Markdown 表格会直接渲染为可读表格
@@ -136,9 +178,11 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ├── bid_parser_api.py          # FastAPI 后端接口，包括上传、解析、分析和流式接口
 ├── bid_analysis_service.py    # 招标文件分析服务，负责解析后并发调用大模型
 ├── bid_analysis_prompts.py    # 大模型分析 Prompt
+├── bid_structured_extraction.py # JSON Schema 结构化抽取、enum 约束和溯源字段转换
 ├── bid_document_parser.py     # 招标文件解析入口和章节拆分
 ├── bid_parse_strategy.py      # 解析方式推荐和解析质量报告
-├── bid_section_retriever.py   # 五大模块宽关键词召回，减少大模型全文重复读取
+├── bid_section_retriever.py   # 模块候选片段混合召回，减少大模型全文重复读取
+├── bid_qualification_prefilter.py # 资格审查/废标项轻量模型逐章预筛
 ├── bid_image_analysis.py      # 文档图片分析和 OCR 辅助能力
 ├── bid_database.py            # SQLite 数据库初始化、知识库 CRUD 和结构化入库
 ├── MinerU_pdf_parse_tool.py   # MinerU API 文档解析工具
@@ -227,8 +271,17 @@ LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
 LLM_TIMEOUT=120
 LLM_MAX_CONCURRENCY=5
 LLM_STREAM_MAX_CONCURRENCY=1
+BID_STRUCTURED_OUTPUT_ENABLED=true
 BID_RETRIEVAL_CONTEXT_CHARS=4500
 BID_RETRIEVAL_MAX_CHARS=52000
+
+BID_QUAL_PREFILTER_ENABLED=true
+BID_QUAL_PREFILTER_MODEL_ID=Qwen/Qwen3-8B
+BID_QUAL_PREFILTER_MAX_CHUNKS=48
+BID_QUAL_PREFILTER_CHUNK_CHARS=4500
+BID_QUAL_PREFILTER_BATCH_SIZE=6
+BID_QUAL_PREFILTER_CONCURRENCY=2
+BID_QUAL_PREFILTER_CONFIDENCE=0.45
 
 MINERU_API_TOKEN=your-mineru-token
 MINERU_REQUEST_TIMEOUT=60
@@ -433,24 +486,25 @@ MINERU_PARALLEL_MAX_WORKERS=3
 
 前端默认模型为 `Qwen3-8B (轻量)`，优先保证可访问性和响应速度。`DeepSeek-V4-Pro`、`Kimi-K2.6 (Pro)` 等 Pro 模型仍保留在模型列表中，适合需要更高质量复核时手动选择；如果服务商返回 `Model is private`，说明当前账号无权调用该模型，需要换用可访问模型或在服务商后台开通权限。
 
-后端会将解析后的文档内容组装为 Markdown，然后先按模块做“宽关键词检索”，再并发执行五个大模型分析任务：
+后端会将解析后的文档内容组装为 Markdown + 结构化元数据，然后按两阶段调用大模型：
 
-- 投标人须知 / 项目概览
-- 商务内容
-- 技术要求
-- 资格审查
-- 评分要求
+1. 第 0 步先生成全局 `project_profile` 和全文 `section_tree`，统一项目名称、编号、预算、招标人、代理机构、采购方式、分包等基础信息，并还原章节标题、层级和起始位置。
+2. 第 1 步并发执行四个专项抽取任务：商务内容、技术要求、资格审查、评分要求。每个专项任务都会携带全局 `project_profile` 和 `section_tree`，并要求模型不得修改项目基本信息，只能从指定候选章节范围内提取。
+3. 资格审查专项会额外走一轮轻量模型预筛：逐章分段标出疑似资格审查、符合性审查、废标/否决投标段落，再把命中片段并入精提取上下文。预筛失败不会中断主流程，会自动回退到规则召回。
+4. 专项抽取默认使用 JSON Schema 结构化输出。每个原子条目都要求带 `source_chunk_id`、`source_text`、`source_heading` 和 `evidence_snippet`，其中 `source_chunk_id` 来自候选片段里的来源标记，`source_text` 用于人工复核和 golden evidence 测试。
+5. Schema 中对关键枚举值做归一化：风险等级为 `高/中/低/未明确`，废标法律性质为 `资格性/符合性/响应性/其他`，审查状态为 `open/resolved/ignored`，评分类型为 `商务评分/技术评分/价格评分/其他`。
 
-每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免五个模块反复读取整份长文档。关键词采用宽匹配策略，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。
+每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免多个模块反复读取整份长文档。召回策略采用“宽关键词 + 章节标题 + 模块语义 query + 规则重排”的混合检索基础版，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。后续可以在 `document_chunks` 上提前生成 embedding，接入 Chroma / FAISS / Qdrant 后，将模块 query 的向量召回与规则召回融合，再做双向排序。
 
 默认上下文参数：
 
 ```env
+BID_STRUCTURED_OUTPUT_ENABLED=true
 BID_RETRIEVAL_CONTEXT_CHARS=4500
 BID_RETRIEVAL_MAX_CHARS=52000
 ```
 
-其中 `BID_RETRIEVAL_CONTEXT_CHARS` 控制每个命中点前后的窗口大小，`BID_RETRIEVAL_MAX_CHARS` 控制每个模块最多交给大模型的候选文本长度。文件特别长时可以适当调低，担心漏内容时可以适当调高。
+其中 `BID_STRUCTURED_OUTPUT_ENABLED` 控制是否启用 JSON Schema 结构化抽取；如果当前服务商或模型不兼容 JSON Schema，可临时设为 `false` 回到旧 Markdown 抽取。`BID_RETRIEVAL_CONTEXT_CHARS` 控制每个命中点前后的窗口大小，`BID_RETRIEVAL_MAX_CHARS` 控制每个模块最多交给大模型的候选文本长度。
 
 前端可以选择：
 
@@ -569,34 +623,94 @@ POST   /knowledge/import
 GET /database/tables
 ```
 
-项目库查询与确认接口：
+项目库查询与删除接口：
 
 ```text
 GET  /projects
 GET  /projects/{project_id}
-POST /projects/records/{table_name}/{record_id}/confirm
 DELETE /projects/{project_id}
 DELETE /projects/records/{table_name}/{record_id}
 ```
+
+## 解析质量增强策略
+
+当前默认模型可以使用 `Qwen3-8B (轻量)`，但小模型对长文档、噪声片段和重复材料清单比较敏感。项目已加入一层轻量质量增强链路：
+
+```text
+原始章节
+  -> 宽关键词召回
+  -> 规则重排
+      -> 标题命中加权
+      -> 表格 / 列表 / 数值线索加权
+      -> 模块负向关键词扣分
+      -> 候选片段去重
+      -> Top 候选截断
+  -> 原子粒度 Prompt 抽取
+  -> 输出后处理
+      -> Markdown 表格行去重
+      -> 句子 / 小点去重
+      -> 《材料名称》去重
+  -> 结构化入库
+```
+
+这套策略的目标是：在不新增外部依赖的情况下，减少给大模型的无关上下文，降低重复输出、材料清单复读、评分和资格混淆等问题。
+
+当前已实现：
+
+- `bid_section_retriever.py`：从宽召回升级为“宽召回 + 规则重排 + Top 候选截断”。
+- `bid_analysis_prompts.py`：补充原子粒度输出要求，要求一个要求、材料或评分点尽量单独一行。
+- `extraction_cleaner.py`：对大模型输出做表格行、句子、小点和《材料名称》去重。
+- `bid_database.py`：入库前再次清洗，并在业务表和 `document_chunks` 层做规范化去重。
+
+后续可继续增强：
+
+- 接入 embedding 模型做语义粗排，例如 `bge-m3`。
+- 接入 reranker 做候选片段重排，例如 `bge-reranker-v2-m3`。
+- 将五大模块输出从 Markdown 进一步升级为 JSON Schema，再由后端统一渲染为表格和写入 SQLite。
+- 对历史项目做“旧项目重建切片”和“旧项目重新抽取”，把旧数据升级到新粒度。
 
 ## 性能说明
 
 智能解析为了提高准确率，会同时做 PDF 类型判断、结构还原、图片提取/OCR、五个模块的大模型分析以及评分上下文筛选，因此复杂文件会比单纯文本抽取更慢。PDF 解析已经改为“快解析 + 结构化 + 多模态”的分流策略。常见耗时来源包括：
 
-- `pdfplumber` 是 `auto` 下原生 PDF 的稳定默认路线。
+- `pdfplumber` 只用于确认无版式风险的极简纯文本 PDF，以及 PDF 预检、fallback 和排障。
 - `pymupdf4llm` 适合原生文本 PDF 快速试验，但在部分 Windows/ONNXRuntime 环境可能不稳定。
 - `docling` 适合原生 PDF 中的表格、章节层级和复杂阅读顺序，但依赖较重，建议手动选择后小范围测试。
-- 扫描件 PDF 或图文混排 PDF 需要调用 MinerU / OCR。
+- 非极简纯文本的原生 PDF、扫描件 PDF 或图文混排 PDF 会优先调用 MinerU / OCR / VLM。
 - `mineru_parallel_pages` 会按页段拆分 PDF，并发提交 MinerU，速度受网络、接口排队和并发数影响。
-- 本地 `pdfplumber` 主要用于 PDF 预检、fallback 和排障，不再作为默认主力解析器。
 - PDF / DOCX 图片解析会额外执行图片提取、OCR 和 AI 备注。
-- 五个模块的大模型分析会先检索候选片段再并发执行，速度主要受候选片段长度、模型速度、服务商并发限制影响。
+- 五个模块的大模型分析会先检索候选片段、规则重排并截断 Top 片段，再并发执行，速度主要受候选片段长度、模型速度、服务商并发限制影响。
+
+## 大模型并发策略
+
+五个模块理论上可以并发调用大模型，但 OpenAI-compatible 服务商经常会对以下场景限制较严：
+
+- 同一 API Key 同时发起多个长上下文请求。
+- 多路流式输出同时保持连接。
+- Pro / 私有模型有并发、速率或权限限制。
+- 单次请求上下文过长，多个请求同时触发超时或连接重置。
+- 本机代理、网络波动或服务商排队导致某一路失败，进而触发降级重试。
+
+因此项目默认采用更稳的并发配置：
+
+```env
+LLM_TIMEOUT=180
+LLM_MAX_CONCURRENCY=2
+LLM_STREAM_MAX_CONCURRENCY=1
+```
+
+含义：
+
+- `LLM_MAX_CONCURRENCY=2`：非流式批量提取最多同时跑 2 个模块。
+- `LLM_STREAM_MAX_CONCURRENCY=1`：流式提取按模块排队流式输出，避免 5 路流式连接同时压服务商。
+- 如果服务商稳定且额度充足，可以把 `LLM_MAX_CONCURRENCY` 调到 3；不建议直接调到 5。
+- 如果仍然失败，优先关闭流式输出，使用非流式稳定提取。
 
 建议使用方式：
 
-- 原生文本 PDF 默认使用 `auto`，会走 `pdfplumber` 稳定路线。
-- 需要更快或更强结构化效果时，再手动试 `pymupdf4llm` 或 `docling`。
-- 扫描件、图文混排、图片较多的文件，使用 `auto` 或 `mineru_parallel_pages`。
+- 极简纯文本 PDF 可以使用 `auto`，系统会走 `pdfplumber` 轻量路线。
+- 非极简原生 PDF、扫描件、图文混排、图片较多的文件，使用 `auto` 或 `mineru_parallel_pages`，系统会优先走 MinerU。
+- 需要本地试验更快或更强结构化效果时，可以手动试 `pymupdf4llm` 或 `docling`。
 - 大文件可以先填写页码范围做小范围测试，再解析整份文件。
 - 如果 MinerU 限流或速度较慢，可以适当降低 `MINERU_PARALLEL_MAX_WORKERS`。
 

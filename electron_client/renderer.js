@@ -157,7 +157,7 @@ const NOTICE_FIELDS = [
   ["招标人", "招标人"],
   ["招标代理机构", "招标代理机构"],
   ["项目所属领域", "项目所属领域"],
-  ["项目时间安排", "项目时间安排"],
+  ["各种时间安排", "各种时间安排"],
   ["项目要实施的具体内容", "项目要实施的具体内容"],
   ["主要技术特点", "主要技术特点"],
   ["其他关键要求", "其他关键要求"]
@@ -165,7 +165,9 @@ const NOTICE_FIELDS = [
 
 const NOTICE_BOOLEAN_FIELDS = [
   ["是否专门面向中小微企业采购", "是否专门面向中小微企业采购"],
-  ["是否为暗标", "是否为暗标"]
+  ["是否为暗标", "是否为暗标"],
+  ["是否允许代理商投标", "是否允许代理商投标"],
+  ["是否允许联合体投标", "是否允许联合体投标"]
 ];
 
 const DEEP_THINKING_MODELS = new Set([
@@ -182,48 +184,42 @@ const PROJECT_TABLE_COLUMNS = {
     ["project_category", "类别"],
     ["budget_text", "预算"],
     ["buyer_name", "招标人"],
-    ["agency_name", "代理机构"],
-    ["confirmed_status", "状态"]
+    ["agency_name", "代理机构"]
   ],
   business_requirements: [
     ["source_heading", "所属标题"],
     ["item_sequence", "序号"],
     ["requirement_type", "类型"],
     ["item_name", "条款"],
-    ["requirement_text", "要求"],
-    ["confirmed_status", "状态"]
+    ["requirement_text", "要求"]
   ],
   technical_requirements: [
     ["source_heading", "所属标题"],
     ["item_sequence", "序号"],
     ["requirement_group", "分组"],
     ["item_name", "项目"],
-    ["requirement_text", "要求"],
-    ["confirmed_status", "状态"]
+    ["requirement_text", "要求"]
   ],
   qualification_requirements: [
     ["source_heading", "所属标题"],
     ["review_type", "审查类型"],
     ["sequence_no", "序号"],
     ["requirement_text", "资格要求"],
-    ["required_materials", "需提供资料"],
-    ["confirmed_status", "状态"]
+    ["required_materials", "需提供资料"]
   ],
   rejection_items: [
     ["source_heading", "所属标题"],
     ["sequence_no", "序号"],
     ["rejection_item", "废标项"],
     ["specific_behavior", "具体表现"],
-    ["risk_level", "风险"],
-    ["confirmed_status", "状态"]
+    ["risk_level", "风险"]
   ],
   scoring_items: [
     ["source_heading", "所属标题"],
     ["score_type", "评分类型"],
     ["item_name", "评分项"],
     ["scoring_standard", "评分标准"],
-    ["score_text", "分数"],
-    ["confirmed_status", "状态"]
+    ["score_text", "分数"]
   ],
   review_findings: [
     ["review_type", "审查类型"],
@@ -244,15 +240,15 @@ const PROJECT_TABLE_COLUMNS = {
     ["section_index", "序号"],
     ["title", "标题"],
     ["section_type", "章节类型"],
-    ["plain_text", "内容摘要"]
+    ["plain_text", "内容摘要"],
+    ["metadata_json", "元数据"]
   ],
   document_chunks: [
     ["chunk_index", "序号"],
     ["chunk_type", "切片类型"],
     ["module", "模块"],
     ["title_path", "标题路径"],
-    ["content", "切片内容"],
-    ["confirmed_status", "状态"]
+    ["content", "切片内容"]
   ],
   extraction_runs: [
     ["run_type", "任务类型"],
@@ -261,16 +257,6 @@ const PROJECT_TABLE_COLUMNS = {
     ["finished_at", "结束时间"]
   ]
 };
-
-const CONFIRMABLE_PROJECT_TABLES = new Set([
-  "project_profile",
-  "business_requirements",
-  "technical_requirements",
-  "qualification_requirements",
-  "rejection_items",
-  "scoring_items",
-  "document_chunks"
-]);
 
 const DELETABLE_PROJECT_TABLES = new Set([
   "project_profile",
@@ -1123,13 +1109,12 @@ function renderProjectTable() {
     return;
   }
   const columns = PROJECT_TABLE_COLUMNS[activeProjectTable] || Object.keys(rows[0]).slice(0, 6).map((key) => [key, key]);
-  const actionHeader = CONFIRMABLE_PROJECT_TABLES.has(activeProjectTable) ? "<th>确认</th>" : "";
   const deleteHeader = DELETABLE_PROJECT_TABLES.has(activeProjectTable) ? "<th>删除</th>" : "";
   projectTableContent.innerHTML = `
     <div class="project-table-wrap">
       <table class="project-data-table">
         <thead>
-          <tr>${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("")}${actionHeader}${deleteHeader}</tr>
+          <tr>${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("")}${deleteHeader}</tr>
         </thead>
         <tbody>
           ${rows.map((row) => renderProjectTableRow(row, columns)).join("")}
@@ -1137,11 +1122,6 @@ function renderProjectTable() {
       </table>
     </div>
   `;
-  projectTableContent.querySelectorAll("[data-confirm-record]").forEach((select) => {
-    select.addEventListener("change", () => {
-      updateProjectRecordStatus(activeProjectTable, select.dataset.confirmRecord, select.value);
-    });
-  });
   projectTableContent.querySelectorAll("[data-delete-record]").forEach((button) => {
     button.addEventListener("click", () => {
       deleteProjectRecord(activeProjectTable, button.dataset.deleteRecord);
@@ -1150,22 +1130,12 @@ function renderProjectTable() {
 }
 
 function renderProjectTableRow(row, columns) {
-  const actionCell = CONFIRMABLE_PROJECT_TABLES.has(activeProjectTable)
-    ? `<td>
-        <select class="status-select" data-confirm-record="${escapeHtml(row.id)}">
-          ${["未确认", "已确认", "需复核"].map((status) => (
-            `<option value="${status}"${(row.confirmed_status || "未确认") === status ? " selected" : ""}>${status}</option>`
-          )).join("")}
-        </select>
-      </td>`
-    : "";
   const deleteCell = DELETABLE_PROJECT_TABLES.has(activeProjectTable)
     ? `<td><button class="table-danger-btn" type="button" data-delete-record="${escapeHtml(row.id)}">删除</button></td>`
     : "";
   return `
     <tr>
       ${columns.map(([key]) => `<td title="${escapeHtml(projectCellValue(row[key]))}">${escapeHtml(projectCellValue(row[key]))}</td>`).join("")}
-      ${actionCell}
       ${deleteCell}
     </tr>
   `;
@@ -1215,23 +1185,6 @@ async function deleteProjectRecord(tableName, recordId) {
     await loadProjectDetail(activeProjectId);
   } catch (error) {
     statusText.textContent = `单条数据删除失败：${error.message}`;
-  }
-}
-
-async function updateProjectRecordStatus(tableName, recordId, status) {
-  const apiBase = getApiBase();
-  try {
-    const response = await fetch(`${apiBase}/projects/records/${encodeURIComponent(tableName)}/${encodeURIComponent(recordId)}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status })
-    });
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-    await loadProjectDetail(activeProjectId);
-  } catch (error) {
-    statusText.textContent = `确认状态更新失败：${error.message}`;
   }
 }
 
@@ -2125,6 +2078,14 @@ function pickValue(map, label) {
   if (map.has(label)) {
     return map.get(label);
   }
+  const aliases = {
+    "各种时间安排": ["项目时间安排", "时间安排", "关键时间节点"]
+  };
+  for (const alias of aliases[label] || []) {
+    if (map.has(alias)) {
+      return map.get(alias);
+    }
+  }
   for (const [key, value] of map.entries()) {
     if (label.includes(key) || key.includes(label)) {
       return value;
@@ -2135,13 +2096,13 @@ function pickValue(map, label) {
 
 function normalizeYesNo(value) {
   const text = String(value || "");
-  if (/^是$|专门|面向|暗标|true/i.test(text)) {
-    return "是";
-  }
-  if (/^否$|不是|非|false/i.test(text)) {
+  if (/^否$|不允许|不接受|不得|不可|不是|非|false|未提及|无法判断/i.test(text)) {
     return "否";
   }
-  return "";
+  if (/^是$|允许|接受|可以|专门|面向|暗标|true/i.test(text)) {
+    return "是";
+  }
+  return "否";
 }
 
 function showResults() {

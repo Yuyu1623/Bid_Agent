@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from bid_analysis_prompts import (
     build_business_content_messages_from_sections,
     build_business_scoring_messages_from_sections,
+    build_global_context_messages_from_sections,
+    build_project_overview_text_from_global_context,
     build_project_overview_messages_from_sections,
     build_qualification_compliance_messages_from_sections,
     build_technical_scoring_messages_from_sections,
@@ -21,11 +23,23 @@ from bid_parse_strategy import (
     inspect_document_profile,
     resolve_parse_method,
 )
+from bid_qualification_prefilter import (
+    merge_qualification_prefilter_sections,
+    prefilter_qualification_sections_sync,
+    qualification_prefilter_enabled,
+)
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_structured_extraction import (
+    build_structured_messages,
+    parse_structured_json,
+    schema_for_field,
+    structured_output_enabled,
+    structured_to_markdown,
+)
 from bid_database import save_analysis_result
 from extraction_cleaner import clean_repeated_extraction_text
 from llm_client import LLM_Invoke
-from llm_model_config import apply_llm_env_selection
+from llm_model_config import apply_llm_env_selection, resolve_llm_base_url
 
 
 class BidAnalysisResult(BaseModel):
@@ -60,6 +74,68 @@ class BidAnalysisResult(BaseModel):
         default_factory=dict,
         description="Structured regex-based content review report.",
     )
+    global_context_markdown: str = Field(
+        default="",
+        description="First-pass project_profile and section_tree context.",
+    )
+    qualification_prefilter_count: int = Field(
+        default=0,
+        description="Number of lightweight prefilter hits used for qualification extraction.",
+    )
+    structured_extraction: dict = Field(
+        default_factory=dict,
+        description="JSON Schema structured extraction payloads by module.",
+    )
+
+
+def _build_lightweight_prefilter_llm(llm_vendor: str) -> LLM_Invoke:
+    import os
+
+    model = os.getenv("BID_QUAL_PREFILTER_MODEL_ID") or "Qwen/Qwen3-8B"
+    base_url = os.getenv("BID_QUAL_PREFILTER_BASE_URL") or resolve_llm_base_url(llm_vendor)
+    timeout = int(os.getenv("BID_QUAL_PREFILTER_TIMEOUT", os.getenv("LLM_TIMEOUT", "120")))
+    return LLM_Invoke(model=model, base_url=base_url, timeout=timeout)
+
+
+def _run_qualification_prefilter(
+    sections: List[BidDocumentSection],
+    llm_vendor: str,
+) -> list[BidDocumentSection]:
+    if not qualification_prefilter_enabled():
+        return []
+    try:
+        return prefilter_qualification_sections_sync(
+            sections,
+            _build_lightweight_prefilter_llm(llm_vendor),
+        )
+    except Exception:
+        return []
+
+
+def _run_structured_job(
+    llm: LLM_Invoke,
+    field: str,
+    messages: list,
+    schema: dict,
+) -> tuple[str, dict]:
+    try:
+        raw = llm.think_json(messages, schema=schema)
+    except Exception:
+        raw = llm.think(
+            [
+                *messages,
+                {
+                    "role": "user",
+                    "content": "只能输出符合上述 JSON Schema 的 JSON 对象，不要输出 Markdown 或解释。",
+                },
+            ],
+            stream=False,
+        )
+    data = parse_structured_json(raw)
+    markdown = structured_to_markdown(field, data)
+    if not markdown:
+        raise ValueError(f"{field} structured JSON parse failed")
+    return markdown, data
 
 
 def analyze_bid_document(
@@ -111,32 +187,139 @@ def analyze_bid_document(
     )
 
     retrieved_sections = retrieve_sections_for_analysis(sections)
-    messages_batch = [
-        build_project_overview_messages_from_sections(retrieved_sections["project_overview"]),
-        build_business_content_messages_from_sections(retrieved_sections["business_content"]),
-        build_technical_scoring_messages_from_sections(retrieved_sections["technical_requirements"]),
-        build_qualification_compliance_messages_from_sections(
-            retrieved_sections["qualification_compliance"]
-        ),
-        build_business_scoring_messages_from_sections(retrieved_sections["scoring"]),
-    ]
+    qualification_prefilter_hits = _run_qualification_prefilter(
+        sections=sections,
+        llm_vendor=llm_vendor,
+    )
+    if qualification_prefilter_hits:
+        retrieved_sections["qualification_compliance"] = merge_qualification_prefilter_sections(
+            retrieved_sections["qualification_compliance"],
+            qualification_prefilter_hits,
+        )
     try:
-        (
-            project_overview,
-            business_content,
-            technical_scoring_requirements,
-            qualification_compliance_requirements,
-            price_scoring_requirements,
-        ) = llm.think_many_sync(messages_batch, stream=stream_output)
+        global_context = llm.think(
+            build_global_context_messages_from_sections(sections),
+            stream=False,
+        ) or ""
+        project_overview = build_project_overview_text_from_global_context(global_context)
     except Exception:
-        project_overview = llm.think(messages_batch[0], stream=stream_output)
-        business_content = llm.think(messages_batch[1], stream=stream_output)
-        technical_scoring_requirements = llm.think(messages_batch[2], stream=stream_output)
-        qualification_compliance_requirements = llm.think(
-            messages_batch[3],
+        global_context = ""
+        project_overview = llm.think(
+            build_project_overview_messages_from_sections(retrieved_sections["project_overview"]),
             stream=stream_output,
         )
-        price_scoring_requirements = llm.think(messages_batch[4], stream=stream_output)
+    structured_outputs: dict[str, dict] = {}
+    if structured_output_enabled():
+        try:
+            structured_jobs = [
+                (
+                    "business_content",
+                    build_structured_messages(
+                        "business_content",
+                        retrieved_sections["business_content"],
+                        global_context=global_context,
+                    ),
+                    schema_for_field("business_content"),
+                ),
+                (
+                    "technical_scoring_requirements",
+                    build_structured_messages(
+                        "technical_scoring_requirements",
+                        retrieved_sections["technical_requirements"],
+                        global_context=global_context,
+                    ),
+                    schema_for_field("technical_scoring_requirements"),
+                ),
+                (
+                    "qualification_compliance_requirements",
+                    build_structured_messages(
+                        "qualification_compliance_requirements",
+                        retrieved_sections["qualification_compliance"],
+                        global_context=global_context,
+                    ),
+                    schema_for_field("qualification_compliance_requirements"),
+                ),
+                (
+                    "price_scoring_requirements",
+                    build_structured_messages(
+                        "price_scoring_requirements",
+                        retrieved_sections["scoring"],
+                        global_context=global_context,
+                    ),
+                    schema_for_field("price_scoring_requirements"),
+                ),
+            ]
+            structured_results = {}
+            for field, messages, schema in structured_jobs:
+                markdown, data = _run_structured_job(llm, field, messages, schema)
+                structured_results[field] = markdown
+                structured_outputs[field] = data
+            business_content = structured_results["business_content"]
+            technical_scoring_requirements = structured_results["technical_scoring_requirements"]
+            qualification_compliance_requirements = structured_results[
+                "qualification_compliance_requirements"
+            ]
+            price_scoring_requirements = structured_results["price_scoring_requirements"]
+        except Exception:
+            structured_outputs = {}
+            messages_batch = [
+                build_business_content_messages_from_sections(
+                    retrieved_sections["business_content"],
+                    global_context=global_context,
+                ),
+                build_technical_scoring_messages_from_sections(
+                    retrieved_sections["technical_requirements"],
+                    global_context=global_context,
+                ),
+                build_qualification_compliance_messages_from_sections(
+                    retrieved_sections["qualification_compliance"],
+                    global_context=global_context,
+                ),
+                build_business_scoring_messages_from_sections(
+                    retrieved_sections["scoring"],
+                    global_context=global_context,
+                ),
+            ]
+            (
+                business_content,
+                technical_scoring_requirements,
+                qualification_compliance_requirements,
+                price_scoring_requirements,
+            ) = llm.think_many_sync(messages_batch, stream=stream_output)
+    else:
+        messages_batch = [
+            build_business_content_messages_from_sections(
+                retrieved_sections["business_content"],
+                global_context=global_context,
+            ),
+            build_technical_scoring_messages_from_sections(
+                retrieved_sections["technical_requirements"],
+                global_context=global_context,
+            ),
+            build_qualification_compliance_messages_from_sections(
+                retrieved_sections["qualification_compliance"],
+                global_context=global_context,
+            ),
+            build_business_scoring_messages_from_sections(
+                retrieved_sections["scoring"],
+                global_context=global_context,
+            ),
+        ]
+        try:
+            (
+                business_content,
+                technical_scoring_requirements,
+                qualification_compliance_requirements,
+                price_scoring_requirements,
+            ) = llm.think_many_sync(messages_batch, stream=stream_output)
+        except Exception:
+            business_content = llm.think(messages_batch[0], stream=stream_output)
+            technical_scoring_requirements = llm.think(messages_batch[1], stream=stream_output)
+            qualification_compliance_requirements = llm.think(
+                messages_batch[2],
+                stream=stream_output,
+            )
+            price_scoring_requirements = llm.think(messages_batch[3], stream=stream_output)
 
     image_analysis_markdown = ""
     image_analysis_items = []
@@ -181,6 +364,9 @@ def analyze_bid_document(
         parse_method_used=parse_method_used,
         parse_method_recommended=parse_method_recommended,
         parse_quality=parse_quality,
+        global_context_markdown=global_context,
+        qualification_prefilter_count=len(qualification_prefilter_hits),
+        structured_extraction=structured_outputs,
         content_review_markdown="内容审查尚未执行，请在前端点击“执行审查”。",
         content_review_report={},
     )

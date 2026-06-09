@@ -16,10 +16,10 @@ LLM_VENDOR_BASE_URLS: Dict[str, str] = {
 
 SILICONFLOW_MODEL_OPTIONS: Dict[str, str] = {
     "DeepSeek-V4-Pro": "deepseek-ai/DeepSeek-V4-Pro",
-    "Kimi-K2.6 (Pro)": "moonshotai/Kimi-K2.6",
-    "GLM-5.1 (Pro)": "zai-org/GLM-5.1",
+    "Kimi-K2.6 (Pro)": "Pro/moonshotai/Kimi-K2.6",
+    "GLM-5.1 (Pro)": "Pro/zai-org/GLM-5.1",
     "MiniMax-M2.5": "MiniMaxAI/MiniMax-M2.5",
-    "GLM-4.7 (Pro)": "zai-org/GLM-4.7",
+    "GLM-4.7 (Pro)": "Pro/zai-org/GLM-4.7",
     "DeepSeek-R1 (Pro)": "deepseek-ai/DeepSeek-R1",
     "Qwen3.6-35B-A3B": "Qwen/Qwen3.6-35B-A3B",
     "Qwen3-8B (轻量)": "Qwen/Qwen3-8B",

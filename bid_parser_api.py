@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from bid_analysis_prompts import (
     build_business_content_messages_from_sections,
     build_business_scoring_messages_from_sections,
+    build_global_context_messages_from_sections,
+    build_project_overview_text_from_global_context,
     build_project_overview_messages_from_sections,
     build_qualification_compliance_messages_from_sections,
     build_technical_scoring_messages_from_sections,
@@ -29,7 +31,20 @@ from bid_parse_strategy import (
     inspect_document_profile,
     resolve_parse_method,
 )
+from bid_qualification_prefilter import (
+    merge_qualification_prefilter_sections,
+    prefilter_qualification_sections,
+    prefilter_qualification_sections_sync,
+    qualification_prefilter_enabled,
+)
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_structured_extraction import (
+    build_structured_messages,
+    parse_structured_json,
+    schema_for_field,
+    structured_output_enabled,
+    structured_to_markdown,
+)
 from bid_database import (
     DB_PATH,
     KNOWLEDGE_TYPES,
@@ -49,7 +64,7 @@ from bid_database import (
 )
 from extraction_cleaner import clean_analysis_dict, clean_repeated_extraction_text
 from llm_client import LLM_Invoke
-from llm_model_config import apply_llm_env_selection
+from llm_model_config import apply_llm_env_selection, resolve_llm_base_url
 
 
 app = FastAPI(title="Plan-and-Solve Bid Document Parser")
@@ -61,7 +76,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BACKEND_BUILD = "2026-06-09-extraction-dedupe-v1"
+BACKEND_BUILD = "2026-06-09-project-delete-v1"
 
 
 @app.on_event("startup")
@@ -114,39 +129,244 @@ def _exception_traceback_tail(exc: Exception, limit: int = 8) -> str:
     return "".join(lines[-limit:]).strip()
 
 
-def _build_analysis_jobs(sections: List[BidDocumentSection]) -> list[tuple[str, str, list]]:
+def _build_analysis_jobs(
+    sections: List[BidDocumentSection],
+    global_context: str = "",
+    include_project_overview: bool = False,
+    qualification_prefilter_sections: Optional[List[BidDocumentSection]] = None,
+) -> list[tuple[str, str, list]]:
     retrieved_sections = retrieve_sections_for_analysis(sections)
+    if qualification_prefilter_sections:
+        retrieved_sections["qualification_compliance"] = merge_qualification_prefilter_sections(
+            retrieved_sections["qualification_compliance"],
+            qualification_prefilter_sections,
+        )
+    jobs: list[tuple[str, str, list]] = []
+    if include_project_overview:
+        jobs.append(
+            (
+                "project_overview",
+                "项目概述",
+                build_project_overview_messages_from_sections(retrieved_sections["project_overview"]),
+            )
+        )
+    jobs.extend(
+        [
+            (
+                "business_content",
+                "商务内容",
+                build_business_content_messages_from_sections(
+                    retrieved_sections["business_content"],
+                    global_context=global_context,
+                ),
+            ),
+            (
+                "technical_scoring_requirements",
+                "技术要求",
+                build_technical_scoring_messages_from_sections(
+                    retrieved_sections["technical_requirements"],
+                    global_context=global_context,
+                ),
+            ),
+            (
+                "qualification_compliance_requirements",
+                "资格和符合性审查",
+                build_qualification_compliance_messages_from_sections(
+                    retrieved_sections["qualification_compliance"],
+                    global_context=global_context,
+                ),
+            ),
+            (
+                "price_scoring_requirements",
+                "评分要求",
+                build_business_scoring_messages_from_sections(
+                    retrieved_sections["scoring"],
+                    global_context=global_context,
+                ),
+            ),
+        ]
+    )
+    return jobs
+
+
+def _build_structured_analysis_jobs(
+    sections: List[BidDocumentSection],
+    global_context: str = "",
+    qualification_prefilter_sections: Optional[List[BidDocumentSection]] = None,
+) -> list[tuple[str, str, list, dict]]:
+    retrieved_sections = retrieve_sections_for_analysis(sections)
+    if qualification_prefilter_sections:
+        retrieved_sections["qualification_compliance"] = merge_qualification_prefilter_sections(
+            retrieved_sections["qualification_compliance"],
+            qualification_prefilter_sections,
+        )
     return [
-        (
-            "project_overview",
-            "项目概述",
-            build_project_overview_messages_from_sections(retrieved_sections["project_overview"]),
-        ),
         (
             "business_content",
             "商务内容",
-            build_business_content_messages_from_sections(retrieved_sections["business_content"]),
+            build_structured_messages(
+                "business_content",
+                retrieved_sections["business_content"],
+                global_context=global_context,
+            ),
+            schema_for_field("business_content"),
         ),
         (
             "technical_scoring_requirements",
             "技术要求",
-            build_technical_scoring_messages_from_sections(
-                retrieved_sections["technical_requirements"]
+            build_structured_messages(
+                "technical_scoring_requirements",
+                retrieved_sections["technical_requirements"],
+                global_context=global_context,
             ),
+            schema_for_field("technical_scoring_requirements"),
         ),
         (
             "qualification_compliance_requirements",
             "资格和符合性审查",
-            build_qualification_compliance_messages_from_sections(
-                retrieved_sections["qualification_compliance"]
+            build_structured_messages(
+                "qualification_compliance_requirements",
+                retrieved_sections["qualification_compliance"],
+                global_context=global_context,
             ),
+            schema_for_field("qualification_compliance_requirements"),
         ),
         (
             "price_scoring_requirements",
             "评分要求",
-            build_business_scoring_messages_from_sections(retrieved_sections["scoring"]),
+            build_structured_messages(
+                "price_scoring_requirements",
+                retrieved_sections["scoring"],
+                global_context=global_context,
+            ),
+            schema_for_field("price_scoring_requirements"),
         ),
     ]
+
+
+def _run_structured_job_sync(
+    llm: LLM_Invoke,
+    field: str,
+    messages: list,
+    schema: dict,
+) -> tuple[str, dict]:
+    try:
+        raw = llm.think_json(messages, schema=schema)
+    except Exception:
+        strict_messages = _messages_with_json_only_instruction(messages)
+        raw = llm.think(strict_messages, stream=False)
+    data = parse_structured_json(raw)
+    markdown = structured_to_markdown(field, data)
+    if not markdown:
+        raise ValueError(f"{field} structured JSON parse failed")
+    return markdown, data
+
+
+async def _run_structured_job_async(
+    llm: LLM_Invoke,
+    field: str,
+    messages: list,
+    schema: dict,
+) -> tuple[str, dict]:
+    try:
+        raw = await llm.athink_json(messages, schema=schema)
+    except Exception:
+        strict_messages = _messages_with_json_only_instruction(messages)
+        raw = await llm.athink(strict_messages, stream=False)
+    data = parse_structured_json(raw)
+    markdown = structured_to_markdown(field, data)
+    if not markdown:
+        raise ValueError(f"{field} structured JSON parse failed")
+    return markdown, data
+
+
+def _messages_with_json_only_instruction(messages: list) -> list:
+    output = [dict(message) for message in messages]
+    output.append(
+        {
+            "role": "user",
+            "content": "再次强调：只能输出符合上述 JSON Schema 的 JSON 对象，不要输出 Markdown 或解释。",
+        }
+    )
+    return output
+
+
+def _build_global_context_sync(
+    llm: LLM_Invoke,
+    sections: List[BidDocumentSection],
+    stream_output: bool,
+) -> tuple[str, str]:
+    """Run the first-pass project profile + section tree extraction."""
+    try:
+        global_context = llm.think(
+            build_global_context_messages_from_sections(sections),
+            stream=False,
+        ) or ""
+        project_overview = build_project_overview_text_from_global_context(global_context)
+        return global_context, project_overview
+    except Exception:
+        messages = build_project_overview_messages_from_sections(
+            retrieve_sections_for_analysis(sections)["project_overview"]
+        )
+        project_overview = llm.think(messages, stream=stream_output) or ""
+        return "", project_overview
+
+
+async def _build_global_context_async(
+    llm: LLM_Invoke,
+    sections: List[BidDocumentSection],
+) -> tuple[str, str]:
+    """Async first-pass project profile + section tree extraction."""
+    try:
+        global_context = await llm.athink(
+            build_global_context_messages_from_sections(sections),
+            stream=False,
+        ) or ""
+        project_overview = build_project_overview_text_from_global_context(global_context)
+        return global_context, project_overview
+    except Exception:
+        messages = build_project_overview_messages_from_sections(
+            retrieve_sections_for_analysis(sections)["project_overview"]
+        )
+        project_overview = await llm.athink(messages, stream=False) or ""
+        return "", project_overview
+
+
+def _build_lightweight_prefilter_llm(llm_vendor: str) -> LLM_Invoke:
+    model = os.getenv("BID_QUAL_PREFILTER_MODEL_ID") or "Qwen/Qwen3-8B"
+    base_url = os.getenv("BID_QUAL_PREFILTER_BASE_URL") or resolve_llm_base_url(llm_vendor)
+    timeout = int(os.getenv("BID_QUAL_PREFILTER_TIMEOUT", os.getenv("LLM_TIMEOUT", "120")))
+    return LLM_Invoke(model=model, base_url=base_url, timeout=timeout)
+
+
+def _run_qualification_prefilter_sync(
+    sections: List[BidDocumentSection],
+    llm_vendor: str,
+) -> list[BidDocumentSection]:
+    if not qualification_prefilter_enabled():
+        return []
+    try:
+        return prefilter_qualification_sections_sync(
+            sections,
+            _build_lightweight_prefilter_llm(llm_vendor),
+        )
+    except Exception:
+        return []
+
+
+async def _run_qualification_prefilter_async(
+    sections: List[BidDocumentSection],
+    llm_vendor: str,
+) -> list[BidDocumentSection]:
+    if not qualification_prefilter_enabled():
+        return []
+    try:
+        return await prefilter_qualification_sections(
+            sections,
+            _build_lightweight_prefilter_llm(llm_vendor),
+        )
+    except Exception:
+        return []
 
 
 def _build_llm(
@@ -228,25 +448,70 @@ def _analyze_sections(
         llm_model=llm_model,
         enable_deep_thinking=enable_deep_thinking,
     )
-    jobs = _build_analysis_jobs(sections)
-    messages_batch = [messages for _, _, messages in jobs]
-    try:
-        (
-            project_overview,
-            business_content,
-            technical_scoring_requirements,
-            qualification_compliance_requirements,
-            price_scoring_requirements,
-        ) = llm.think_many_sync(messages_batch, stream=stream_output)
-    except Exception:
-        project_overview = llm.think(messages_batch[0], stream=stream_output)
-        business_content = llm.think(messages_batch[1], stream=stream_output)
-        technical_scoring_requirements = llm.think(messages_batch[2], stream=stream_output)
-        qualification_compliance_requirements = llm.think(
-            messages_batch[3],
-            stream=stream_output,
+    global_context, project_overview = _build_global_context_sync(
+        llm=llm,
+        sections=sections,
+        stream_output=stream_output,
+    )
+    qualification_prefilter_hits = _run_qualification_prefilter_sync(
+        sections=sections,
+        llm_vendor=llm_vendor,
+    )
+    structured_outputs: dict[str, dict] = {}
+    if structured_output_enabled():
+        try:
+            structured_jobs = _build_structured_analysis_jobs(
+                sections,
+                global_context=global_context,
+                qualification_prefilter_sections=qualification_prefilter_hits,
+            )
+            structured_results = {}
+            for field, _, messages, schema in structured_jobs:
+                markdown, data = _run_structured_job_sync(llm, field, messages, schema)
+                structured_results[field] = markdown
+                structured_outputs[field] = data
+            business_content = structured_results["business_content"]
+            technical_scoring_requirements = structured_results["technical_scoring_requirements"]
+            qualification_compliance_requirements = structured_results[
+                "qualification_compliance_requirements"
+            ]
+            price_scoring_requirements = structured_results["price_scoring_requirements"]
+        except Exception:
+            structured_outputs = {}
+            jobs = _build_analysis_jobs(
+                sections,
+                global_context=global_context,
+                qualification_prefilter_sections=qualification_prefilter_hits,
+            )
+            messages_batch = [messages for _, _, messages in jobs]
+            (
+                business_content,
+                technical_scoring_requirements,
+                qualification_compliance_requirements,
+                price_scoring_requirements,
+            ) = llm.think_many_sync(messages_batch, stream=stream_output)
+    else:
+        jobs = _build_analysis_jobs(
+            sections,
+            global_context=global_context,
+            qualification_prefilter_sections=qualification_prefilter_hits,
         )
-        price_scoring_requirements = llm.think(messages_batch[4], stream=stream_output)
+        messages_batch = [messages for _, _, messages in jobs]
+        try:
+            (
+                business_content,
+                technical_scoring_requirements,
+                qualification_compliance_requirements,
+                price_scoring_requirements,
+            ) = llm.think_many_sync(messages_batch, stream=stream_output)
+        except Exception:
+            business_content = llm.think(messages_batch[0], stream=stream_output)
+            technical_scoring_requirements = llm.think(messages_batch[1], stream=stream_output)
+            qualification_compliance_requirements = llm.think(
+                messages_batch[2],
+                stream=stream_output,
+            )
+            price_scoring_requirements = llm.think(messages_batch[3], stream=stream_output)
 
     result = BidAnalysisResult(
         sections=sections,
@@ -255,6 +520,9 @@ def _analyze_sections(
         technical_scoring_requirements=clean_repeated_extraction_text(technical_scoring_requirements),
         qualification_compliance_requirements=clean_repeated_extraction_text(qualification_compliance_requirements),
         price_scoring_requirements=clean_repeated_extraction_text(price_scoring_requirements),
+        global_context_markdown=global_context,
+        qualification_prefilter_count=len(qualification_prefilter_hits),
+        structured_extraction=structured_outputs,
         content_review_markdown="内容审查尚未执行，请在前端点击“执行审查”。",
         content_review_report={},
     )
@@ -284,6 +552,10 @@ def health() -> dict:
             "sqlite_knowledge_demo": True,
             "project_library": True,
             "extraction_dedupe": True,
+            "project_delete": True,
+            "global_context_first_pass": True,
+            "hybrid_retrieval_query_rerank": True,
+            "qualification_rejection_prefilter": True,
         },
         "backend_file": __file__,
         "backend_dir": str(Path(__file__).resolve().parent),
@@ -810,6 +1082,36 @@ async def upload_and_analyze_document_stream(
                 base_url=resolved_base_url,
                 enable_deep_thinking=enable_deep_thinking,
             )
+            yield _stream_event(
+                "status",
+                field="project_overview",
+                message="正在生成项目画像和全文章节树...",
+            )
+            global_context, project_overview = await _build_global_context_async(llm, sections)
+            results["project_overview"] = project_overview
+            results["global_context_markdown"] = global_context
+            yield _stream_event(
+                "field_done",
+                field="project_overview",
+                message="项目画像和章节树生成完成",
+                content=project_overview,
+            )
+            yield _stream_event(
+                "status",
+                field="qualification_compliance_requirements",
+                message="正在用轻量模型逐章预筛疑似资格审查和废标段落...",
+            )
+            qualification_prefilter_hits = await _run_qualification_prefilter_async(
+                sections=sections,
+                llm_vendor=llm_vendor,
+            )
+            results["qualification_prefilter_count"] = len(qualification_prefilter_hits)
+            if qualification_prefilter_hits:
+                yield _stream_event(
+                    "status",
+                    field="qualification_compliance_requirements",
+                    message=f"资格/废标预筛完成，命中 {len(qualification_prefilter_hits)} 个疑似片段，已并入精提取上下文。",
+                )
 
             async def run_image_analysis():
                 with TemporaryDirectory() as image_temp_dir:
@@ -830,102 +1132,124 @@ async def upload_and_analyze_document_stream(
 
             image_task = asyncio.create_task(run_image_analysis())
 
-            jobs = _build_analysis_jobs(sections)
-
-            stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "1")))
-            stream_semaphore = asyncio.Semaphore(stream_concurrency)
-            yield _stream_event(
-                "status",
-                message=f"正在提取五个分析模块（流式并发 {stream_concurrency} 路）...",
-            )
-            parallel_failed = False
-            queue: asyncio.Queue[dict] = asyncio.Queue()
-
-            async def run_stream_job(field: str, label: str, messages: list) -> None:
-                try:
-                    await queue.put(
-                        {
-                            "type": "status",
-                            "field": field,
-                            "message": f"正在提取{label}...",
-                        }
-                    )
-                    async with stream_semaphore:
-                        async for chunk in llm.astream(messages):
-                            results[field] += chunk
-                            await queue.put(
-                                {
-                                    "type": "chunk",
-                                    "field": field,
-                                    "content": chunk,
-                                }
-                            )
-                    await queue.put(
-                        {
-                            "type": "field_done",
-                            "field": field,
-                            "message": f"{label}提取完成",
-                            "content": results[field],
-                        }
-                    )
-                except Exception as exc:
-                    await queue.put(
-                        {
-                            "type": "parallel_error",
-                            "field": field,
-                            "message": str(exc) or exc.__class__.__name__,
-                        }
-                    )
-
-            tasks = [
-                asyncio.create_task(run_stream_job(field, label, messages))
-                for field, label, messages in jobs
-            ]
-            pending_count = len(tasks)
-            while pending_count:
-                event = await queue.get()
-                if event["type"] == "parallel_error":
-                    parallel_failed = True
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    yield _stream_event(
-                        "status",
-                        message="流式提取失败，正在自动切换为非流式稳定提取...",
-                    )
-                    break
-
-                if event["type"] == "field_done":
-                    pending_count -= 1
-
-                yield _stream_event(str(event.pop("type")), **event)
-
-            if parallel_failed:
-                for field in results:
-                    results[field] = ""
-                for field, label, messages in jobs:
-                    yield _stream_event("status", field=field, message=f"正在稳定提取{label}...")
+            if structured_output_enabled():
+                structured_jobs = _build_structured_analysis_jobs(
+                    sections,
+                    global_context=global_context,
+                    qualification_prefilter_sections=qualification_prefilter_hits,
+                )
+                results["structured_extraction"] = {}
+                yield _stream_event("status", message="正在按 JSON Schema 结构化抽取四个专项模块...")
+                for field, label, messages, schema in structured_jobs:
+                    yield _stream_event("status", field=field, message=f"正在结构化抽取{label}...")
                     try:
-                        results[field] = await llm.athink(messages, stream=False)
-                    except Exception as exc:
-                        error_type, message, hint = _classify_exception(exc, stage=f"{label}提取")
-                        results[field] = "\n".join(
-                            [
-                                f"{label}提取失败。",
-                                f"错误类型：{error_type}",
-                                f"错误信息：{message}",
-                                f"排查建议：{hint}",
-                                "",
-                                "后端 traceback 摘要：",
-                                _exception_traceback_tail(exc),
-                            ]
+                        markdown, data = await _run_structured_job_async(llm, field, messages, schema)
+                        results[field] = markdown
+                        results["structured_extraction"][field] = data
+                    except Exception:
+                        fallback_jobs = _build_analysis_jobs(
+                            sections,
+                            global_context=global_context,
+                            qualification_prefilter_sections=qualification_prefilter_hits,
                         )
+                        fallback = next(job for job in fallback_jobs if job[0] == field)
+                        results[field] = await llm.athink(fallback[2], stream=False)
                     yield _stream_event(
                         "field_done",
                         field=field,
-                        message=f"{label}提取完成" if not results[field].startswith(f"{label}提取失败。") else f"{label}提取失败",
+                        message=f"{label}结构化抽取完成",
                         content=results[field],
                     )
+                jobs = [(field, label, []) for field, label, _, _ in structured_jobs]
+            else:
+                jobs = _build_analysis_jobs(
+                    sections,
+                    global_context=global_context,
+                    qualification_prefilter_sections=qualification_prefilter_hits,
+                )
+
+                stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "1")))
+                stream_semaphore = asyncio.Semaphore(stream_concurrency)
+                yield _stream_event(
+                    "status",
+                    message=f"正在提取四个专项模块（流式并发 {stream_concurrency} 路）...",
+                )
+                parallel_failed = False
+                queue: asyncio.Queue[dict] = asyncio.Queue()
+
+                async def run_stream_job(field: str, label: str, messages: list) -> None:
+                    try:
+                        await queue.put({"type": "status", "field": field, "message": f"正在提取{label}..."})
+                        async with stream_semaphore:
+                            async for chunk in llm.astream(messages):
+                                results[field] += chunk
+                                await queue.put({"type": "chunk", "field": field, "content": chunk})
+                        await queue.put(
+                            {
+                                "type": "field_done",
+                                "field": field,
+                                "message": f"{label}提取完成",
+                                "content": results[field],
+                            }
+                        )
+                    except Exception as exc:
+                        await queue.put(
+                            {
+                                "type": "parallel_error",
+                                "field": field,
+                                "message": str(exc) or exc.__class__.__name__,
+                            }
+                        )
+
+                tasks = [
+                    asyncio.create_task(run_stream_job(field, label, messages))
+                    for field, label, messages in jobs
+                ]
+                pending_count = len(tasks)
+                while pending_count:
+                    event = await queue.get()
+                    if event["type"] == "parallel_error":
+                        parallel_failed = True
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        yield _stream_event(
+                            "status",
+                            message="流式提取失败，正在自动切换为非流式稳定提取...",
+                        )
+                        break
+
+                    if event["type"] == "field_done":
+                        pending_count -= 1
+
+                    yield _stream_event(str(event.pop("type")), **event)
+
+                if parallel_failed:
+                    for field, _, _ in jobs:
+                        results[field] = ""
+                    for field, label, messages in jobs:
+                        yield _stream_event("status", field=field, message=f"正在稳定提取{label}...")
+                        try:
+                            results[field] = await llm.athink(messages, stream=False)
+                        except Exception as exc:
+                            error_type, message, hint = _classify_exception(exc, stage=f"{label}提取")
+                            results[field] = "\n".join(
+                                [
+                                    f"{label}提取失败。",
+                                    f"错误类型：{error_type}",
+                                    f"错误信息：{message}",
+                                    f"排查建议：{hint}",
+                                    "",
+                                    "后端 traceback 摘要：",
+                                    _exception_traceback_tail(exc),
+                                ]
+                            )
+                        yield _stream_event(
+                            "field_done",
+                            field=field,
+                            message=f"{label}提取完成" if not results[field].startswith(f"{label}提取失败。") else f"{label}提取失败",
+                            content=results[field],
+                        )
 
             results = clean_analysis_dict(results)
             for field, label, _ in jobs:
@@ -1024,12 +1348,46 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
                 llm_model=request.llm_model,
                 enable_deep_thinking=request.enable_deep_thinking,
             )
-            jobs = _build_analysis_jobs(sections)
+            yield _stream_event(
+                "status",
+                field="project_overview",
+                message="正在生成项目画像和全文章节树...",
+            )
+            global_context, project_overview = await _build_global_context_async(llm, sections)
+            results["project_overview"] = project_overview
+            results["global_context_markdown"] = global_context
+            yield _stream_event(
+                "field_done",
+                field="project_overview",
+                message="项目画像和章节树生成完成",
+                content=project_overview,
+            )
+            yield _stream_event(
+                "status",
+                field="qualification_compliance_requirements",
+                message="正在用轻量模型逐章预筛疑似资格审查和废标段落...",
+            )
+            qualification_prefilter_hits = await _run_qualification_prefilter_async(
+                sections=sections,
+                llm_vendor=request.llm_vendor,
+            )
+            results["qualification_prefilter_count"] = len(qualification_prefilter_hits)
+            if qualification_prefilter_hits:
+                yield _stream_event(
+                    "status",
+                    field="qualification_compliance_requirements",
+                    message=f"资格/废标预筛完成，命中 {len(qualification_prefilter_hits)} 个疑似片段，已并入精提取上下文。",
+                )
+            jobs = _build_analysis_jobs(
+                sections,
+                global_context=global_context,
+                qualification_prefilter_sections=qualification_prefilter_hits,
+            )
             stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "1")))
             stream_semaphore = asyncio.Semaphore(stream_concurrency)
             yield _stream_event(
                 "status",
-                message=f"正在提取五个分析模块（流式并发 {stream_concurrency} 路）...",
+                message=f"正在提取四个专项模块（流式并发 {stream_concurrency} 路）...",
             )
             parallel_failed = False
             queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -1092,7 +1450,7 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
                 yield _stream_event(str(event.pop("type")), **event)
 
             if parallel_failed:
-                for field in results:
+                for field, _, _ in jobs:
                     results[field] = ""
                 for field, label, messages in jobs:
                     yield _stream_event("status", field=field, message=f"正在稳定提取{label}...")

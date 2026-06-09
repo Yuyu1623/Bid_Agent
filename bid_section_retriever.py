@@ -66,6 +66,50 @@ MODULE_LABELS = {
     "scoring": "评分要求候选片段",
 }
 
+MODULE_NEGATIVE_PATTERNS: dict[str, Sequence[str]] = {
+    "business_content": (
+        r"评分办法|评分标准|评审标准|分值|得分",
+        r"技术评分|商务评分|价格评分",
+    ),
+    "technical_requirements": (
+        r"评分办法|评分标准|商务评分|价格评分|资格审查",
+    ),
+    "qualification_compliance": (
+        r"技术评分|商务评分|价格评分|评分标准",
+    ),
+    "scoring": (
+        r"合同条款|付款方式|交付方式|售后服务承诺函",
+        r"项目概况|投标人须知前附表",
+    ),
+}
+
+MODULE_TITLE_BOOSTS: dict[str, Sequence[str]] = {
+    "project_overview": (
+        r"投标人须知|项目概况|项目基本情况|采购需求",
+    ),
+    "business_content": (
+        r"商务要求|商务条款|合同条款|投标文件商务响应要求",
+    ),
+    "technical_requirements": (
+        r"技术要求|技术规格|采购需求|服务需求|项目实施|交付要求",
+    ),
+    "qualification_compliance": (
+        r"资格审查|符合性审查|废标|否决|无效投标|初步审查",
+    ),
+    "scoring": (
+        r"评分办法|评分标准|评审标准|评标办法|综合评分",
+    ),
+}
+
+
+MODULE_SEMANTIC_QUERIES: dict[str, str] = {
+    "project_overview": "项目名称 项目编号 采购方式 招标人 采购人 招标代理机构 预算 最高限价 包号 分包 服务期限 履约期限 项目概况 时间安排",
+    "business_content": "付款方式 合同价款 履约保证金 投标保证金 质保金 发票要求 报价方式 报价范围 交付地点 验收方式 售后服务 违约责任 商务偏离",
+    "technical_requirements": "技术参数 功能要求 性能指标 实施要求 交付要求 验收标准 运维要求 服务方案 技术方案 数据治理 系统接口 安全要求",
+    "qualification_compliance": "资格审查 资格条件 符合性审查 无效投标 废标条款 否决投标 证明材料 营业执照 授权书 承诺函 纳税 社保 信用中国",
+    "scoring": "评分办法 评审标准 综合评分表 商务评分 技术评分 评分项 评分标准 分值 得分条件 证明材料 扣分 不得分",
+}
+
 
 def retrieve_sections_for_analysis(
     sections: Sequence[BidDocumentSection],
@@ -94,12 +138,21 @@ def retrieve_sections_for_module(
     if module not in MODULE_PATTERNS:
         return list(sections)
 
-    context_chars = context_chars or int(os.getenv("BID_RETRIEVAL_CONTEXT_CHARS", "4500"))
-    max_chars = max_chars or int(os.getenv("BID_RETRIEVAL_MAX_CHARS", "52000"))
+    context_chars = context_chars or int(os.getenv("BID_RETRIEVAL_CONTEXT_CHARS", "3200"))
+    max_chars = max_chars or int(os.getenv("BID_RETRIEVAL_MAX_CHARS", "36000"))
+    max_candidates = int(os.getenv("BID_RETRIEVAL_MAX_CANDIDATES", "12"))
     pattern = re.compile("|".join(f"(?:{item})" for item in MODULE_PATTERNS[module]), re.IGNORECASE)
+    negative_pattern = _compile_optional(MODULE_NEGATIVE_PATTERNS.get(module, ()))
 
     section_texts = [_section_markdown(section) for section in sections]
-    hit_indices = [idx for idx, text in enumerate(section_texts) if pattern.search(text)]
+    semantic_terms = _semantic_terms(MODULE_SEMANTIC_QUERIES.get(module, ""))
+    pattern_hit_indices = [idx for idx, text in enumerate(section_texts) if pattern.search(text)]
+    semantic_hit_indices = [
+        idx
+        for idx, text in enumerate(section_texts)
+        if _semantic_query_score(text, semantic_terms) >= 2.5
+    ]
+    hit_indices = sorted(set(pattern_hit_indices) | set(semantic_hit_indices))
 
     if not hit_indices:
         return _fallback_sections(module, sections, max_chars=max_chars)
@@ -112,7 +165,7 @@ def retrieve_sections_for_module(
             if selected_idx not in selected_indices:
                 selected_indices.append(selected_idx)
 
-    output: list[BidDocumentSection] = []
+    candidates: list[tuple[float, int, str, BidDocumentSection]] = []
     used_chars = 0
     chunk_index = 1
     for idx in selected_indices:
@@ -121,7 +174,7 @@ def retrieve_sections_for_module(
         if not text.strip():
             continue
 
-        if idx in hit_indices:
+        if idx in pattern_hit_indices:
             chunks = _hit_windows(text, pattern, context_chars=context_chars)
         else:
             chunks = [text[: min(len(text), context_chars)]]
@@ -135,21 +188,139 @@ def retrieve_sections_for_module(
                 break
             if len(chunk) > remaining:
                 chunk = chunk[:remaining].rstrip()
-            output.append(
-                BidDocumentSection(
-                    index=chunk_index,
-                    title=f"{MODULE_LABELS[module]} - 原章节{section.index}: {section.title}",
-                    level=section.level,
-                    content=chunk,
-                    markdown=f"## {MODULE_LABELS[module]} - 原章节{section.index}: {section.title}\n\n{chunk}",
+            score = _score_candidate(
+                module=module,
+                section=section,
+                chunk=chunk,
+                pattern=pattern,
+                negative_pattern=negative_pattern,
+                is_direct_hit=idx in hit_indices,
+                semantic_terms=semantic_terms,
+            )
+            candidates.append(
+                (
+                    score,
+                    idx,
+                    chunk,
+                    BidDocumentSection(
+                        index=chunk_index,
+                        title=f"{MODULE_LABELS[module]} - 原章节{section.index}: {section.title}",
+                        level=section.level,
+                        content=chunk,
+                        markdown=f"## {MODULE_LABELS[module]} - 原章节{section.index}: {section.title}\n\n{chunk}",
+                    ),
                 )
             )
             chunk_index += 1
-            used_chars += len(chunk)
-        if used_chars >= max_chars:
+
+    ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))
+    output: list[BidDocumentSection] = []
+    seen: set[str] = set()
+    used_chars = 0
+    for score, _, chunk, candidate in ranked[: max_candidates * 2]:
+        key = _normalize_candidate(chunk)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        remaining = max_chars - used_chars
+        if remaining <= 0:
+            break
+        content = candidate.content
+        if len(content) > remaining:
+            content = content[:remaining].rstrip()
+        output.append(
+            BidDocumentSection(
+                index=len(output) + 1,
+                title=f"{candidate.title}（相关度 {score:.1f}）",
+                level=candidate.level,
+                content=content,
+                markdown=f"## {candidate.title}（相关度 {score:.1f}）\n\n{content}",
+            )
+        )
+        used_chars += len(content)
+        if len(output) >= max_candidates:
             break
 
     return output or _fallback_sections(module, sections, max_chars=max_chars)
+
+
+def _compile_optional(patterns: Sequence[str] | None) -> re.Pattern[str] | None:
+    if not patterns:
+        return None
+    return re.compile("|".join(f"(?:{item})" for item in patterns), re.IGNORECASE)
+
+
+def _score_candidate(
+    *,
+    module: str,
+    section: BidDocumentSection,
+    chunk: str,
+    pattern: re.Pattern[str],
+    negative_pattern: re.Pattern[str] | None,
+    is_direct_hit: bool,
+    semantic_terms: Sequence[str],
+) -> float:
+    title = section.title or ""
+    title_pattern = _compile_optional(MODULE_TITLE_BOOSTS.get(module, ()))
+    hits = len(pattern.findall(chunk))
+    title_hits = len(pattern.findall(title))
+    score = hits * 3.0 + title_hits * 5.0
+    if is_direct_hit:
+        score += 4.0
+    if title_pattern and title_pattern.search(title):
+        score += 12.0
+    score += _semantic_query_score(f"{title}\n{chunk}", semantic_terms)
+    if _looks_like_table_or_list(chunk):
+        score += 3.0
+    if re.search(r"\d+\s*(分|万元|日|天|个月|年|%)", chunk):
+        score += 2.0
+    if negative_pattern:
+        score -= len(negative_pattern.findall(chunk)) * 4.0
+        if negative_pattern.search(title):
+            score -= 8.0
+    score += min(len(chunk), 3000) / 3000
+    return max(score, 0.1)
+
+
+def _semantic_terms(query: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    for item in re.split(r"[\s,，、;；/|]+", query or ""):
+        item = item.strip()
+        if len(item) >= 2 and item not in terms:
+            terms.append(item)
+    return tuple(terms)
+
+
+def _semantic_query_score(text: str, terms: Sequence[str]) -> float:
+    if not text or not terms:
+        return 0.0
+    compact = re.sub(r"\s+", "", text)
+    score = 0.0
+    for term in terms:
+        if term in text or term in compact:
+            score += 1.2
+            continue
+        if len(term) >= 4:
+            grams = {term[index : index + 2] for index in range(len(term) - 1)}
+            if not grams:
+                continue
+            hit_ratio = sum(1 for gram in grams if gram in compact) / len(grams)
+            if hit_ratio >= 0.6:
+                score += 0.6
+    return min(score, 12.0)
+
+
+def _looks_like_table_or_list(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    table_lines = sum(1 for line in lines if line.startswith("|") and line.endswith("|"))
+    list_lines = sum(1 for line in lines if re.match(r"^([-*+]|\d+[.、]|[一二三四五六七八九十]+[、.])\s*", line))
+    return table_lines >= 2 or list_lines >= 2
+
+
+def _normalize_candidate(text: str) -> str:
+    value = re.sub(r"\s+", "", text or "")
+    value = re.sub(r"[，,。；;：:、|/\\（）()\[\]【】《》\"'“”‘’`]+", "", value)
+    return value[:300].lower()
 
 
 def _section_markdown(section: BidDocumentSection) -> str:

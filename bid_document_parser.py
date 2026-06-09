@@ -23,6 +23,10 @@ class BidDocumentSection(BaseModel):
     level: int = Field(description="Heading level. Smaller numbers are higher level.")
     content: str = Field(description="Section body without the heading line.")
     markdown: str = Field(description="Section heading and body in Markdown.")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Structured metadata such as title path, tables, images and page hints.",
+    )
 
 
 MINERU_PARSE_METHODS = {"mineru_vlm", "mineru_pipeline", "mineru_html"}
@@ -78,7 +82,8 @@ def parse_bid_document(
         poll_interval=poll_interval,
         timeout=timeout,
     )
-    return split_bid_markdown_sections(markdown)
+    sections = split_bid_markdown_sections(markdown)
+    return enrich_sections_with_metadata(sections, document=document)
 
 
 def parse_document_to_markdown(
@@ -188,12 +193,48 @@ def _normalize_parse_method(document: str, parse_method: Optional[str]) -> str:
             return "mineru_parallel_pages" if page_count >= 30 else "mineru_vlm"
         if _pdf_has_images(path):
             return "mineru_parallel_pages"
-        # Use the most stable local parser for auto. PyMuPDF4LLM and Docling
-        # remain available as manual choices for faster/structured experiments.
-        return "pdfplumber"
+        if _pdf_is_simple_text_file(path):
+            return "pdfplumber"
+        page_count = _get_pdf_page_count(path)
+        return "mineru_parallel_pages" if page_count >= 30 else "mineru_pipeline"
     if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         return "mineru_vlm"
     return "mineru_vlm"
+
+
+def _pdf_is_simple_text_file(path: Path) -> bool:
+    """Return True only for lightweight native PDFs without obvious layout risk."""
+    if path.suffix.lower() != ".pdf" or not path.exists():
+        return False
+    try:
+        import pdfplumber
+    except ImportError:
+        return False
+
+    try:
+        with pdfplumber.open(path) as pdf:
+            page_count = len(pdf.pages)
+            if page_count > int(os.getenv("PDFPLUMBER_SIMPLE_MAX_PAGES", "20")):
+                return False
+            selected_pages = pdf.pages[: min(page_count, 5)]
+            if not selected_pages:
+                return False
+            total_chars = 0
+            table_pages = 0
+            image_count = 0
+            for page in selected_pages:
+                text = page.extract_text() or ""
+                total_chars += len(text.strip())
+                image_count += len(getattr(page, "images", []) or [])
+                try:
+                    if page.extract_tables():
+                        table_pages += 1
+                except Exception:
+                    pass
+            chars_per_page = total_chars / max(1, len(selected_pages))
+            return image_count == 0 and table_pages == 0 and chars_per_page >= 300
+    except Exception:
+        return False
 
 
 def _parse_with_parallel_mineru_pages(
@@ -471,6 +512,7 @@ def split_bid_markdown_sections(markdown: str) -> List[BidDocumentSection]:
         ]
 
     sections: List[BidDocumentSection] = []
+    title_stack: list[tuple[int, str]] = []
     preface = "\n".join(lines[: heading_positions[0][0]]).strip()
     if preface:
         sections.append(
@@ -480,6 +522,13 @@ def split_bid_markdown_sections(markdown: str) -> List[BidDocumentSection]:
                 level=1,
                 content=preface,
                 markdown=preface,
+                metadata={
+                    "title_path": ["前言"],
+                    "tables": _extract_markdown_tables_json(preface),
+                    "images": [],
+                    "page_start": _guess_page_number(preface),
+                    "page_end": _guess_page_number(preface),
+                },
             )
         )
 
@@ -492,6 +541,10 @@ def split_bid_markdown_sections(markdown: str) -> List[BidDocumentSection]:
         chunk_lines = lines[start_line:end_line]
         markdown_chunk = "\n".join(chunk_lines).strip()
         content = "\n".join(chunk_lines[1:]).strip()
+        while title_stack and title_stack[-1][0] >= level:
+            title_stack.pop()
+        title_stack.append((level, title.strip()))
+        title_path = [item[1] for item in title_stack]
         sections.append(
             BidDocumentSection(
                 index=len(sections) + 1,
@@ -499,10 +552,91 @@ def split_bid_markdown_sections(markdown: str) -> List[BidDocumentSection]:
                 level=level,
                 content=content,
                 markdown=markdown_chunk,
+                metadata={
+                    "title_path": title_path,
+                    "tables": _extract_markdown_tables_json(markdown_chunk),
+                    "images": [],
+                    "page_start": _guess_page_number(markdown_chunk),
+                    "page_end": _guess_page_number(markdown_chunk),
+                    "heading_detection": "markdown_or_number_pattern",
+                },
             )
         )
 
     return sections
+
+
+def enrich_sections_with_metadata(
+    sections: List[BidDocumentSection],
+    *,
+    document: str,
+) -> List[BidDocumentSection]:
+    path = Path(document)
+    image_items = _extract_docx_image_metadata(path) if path.suffix.lower() == ".docx" else []
+    if not image_items:
+        return sections
+
+    for image in image_items:
+        target_index = _match_image_to_section(image, sections)
+        if target_index is None:
+            continue
+        metadata = dict(sections[target_index].metadata or {})
+        images = list(metadata.get("images") or [])
+        images.append(image)
+        metadata["images"] = images
+        sections[target_index].metadata = metadata
+    return sections
+
+
+def _match_image_to_section(image: dict[str, Any], sections: List[BidDocumentSection]) -> int | None:
+    anchor = str(image.get("nearby_text") or image.get("paragraph_text") or "").strip()
+    if anchor:
+        anchor_key = re.sub(r"\s+", "", anchor)[:40]
+        for index, section in enumerate(sections):
+            section_text = re.sub(r"\s+", "", section.markdown or section.content or "")
+            if anchor_key and anchor_key in section_text:
+                return index
+    return len(sections) - 1 if sections else None
+
+
+def _extract_markdown_tables_json(markdown: str) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    table_lines: list[str] = []
+    for line in str(markdown or "").splitlines() + [""]:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            table_lines.append(stripped)
+            continue
+        if table_lines:
+            parsed = _parse_markdown_table(table_lines)
+            if parsed:
+                tables.append(parsed)
+            table_lines = []
+    return tables
+
+
+def _parse_markdown_table(lines: list[str]) -> dict[str, Any] | None:
+    data_lines = [
+        line
+        for line in lines
+        if not re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", line)
+    ]
+    if not data_lines:
+        return None
+    rows = [[cell.strip() for cell in line.split("|")[1:-1]] for line in data_lines]
+    header = rows[0] if rows else []
+    body = rows[1:] if len(rows) > 1 else []
+    return {
+        "headers": header,
+        "rows": body,
+        "row_count": len(body),
+        "markdown": "\n".join(lines),
+    }
+
+
+def _guess_page_number(markdown: str) -> int | None:
+    match = re.search(r"第\s*(\d+)\s*页", str(markdown or ""))
+    return int(match.group(1)) if match else None
 
 
 def _resolve_mineru_method(
@@ -713,6 +847,181 @@ def _extract_docx_images(path: Path, output_dir: Path) -> List[Path]:
             target_path.write_bytes(archive.read(name))
             image_paths.append(target_path)
     return image_paths
+
+
+def _extract_docx_image_metadata(path: Path) -> list[dict[str, Any]]:
+    if not path.exists() or path.suffix.lower() != ".docx":
+        return []
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+    except ImportError:
+        return []
+
+    try:
+        document = Document(path)
+    except Exception:
+        return []
+
+    relationship_to_name = _docx_image_relationship_names(path)
+    output: list[dict[str, Any]] = []
+
+    paragraph_context = []
+    for paragraph_index, paragraph in enumerate(document.paragraphs, start=1):
+        paragraph_context.append((paragraph_index, paragraph.text.strip(), paragraph))
+
+    for paragraph_index, text, paragraph in paragraph_context:
+        rel_ids = _paragraph_image_rel_ids(paragraph)
+        if not rel_ids:
+            continue
+        nearby = _nearby_paragraph_text(paragraph_context, paragraph_index)
+        for rel_id in rel_ids:
+            file_name = relationship_to_name.get(rel_id, rel_id)
+            output.append(
+                _build_docx_image_metadata(
+                    image_index=len(output) + 1,
+                    source=file_name,
+                    location_type="paragraph",
+                    paragraph_index=paragraph_index,
+                    table_index=None,
+                    nearby_text=nearby,
+                    paragraph_text=text,
+                    path=path,
+                    rel_id=rel_id,
+                )
+            )
+
+    for table_index, table in enumerate(document.tables, start=1):
+        for row_index, row in enumerate(table.rows, start=1):
+            for cell_index, cell in enumerate(row.cells, start=1):
+                cell_text = " ".join(p.text.strip() for p in cell.paragraphs if p.text.strip())
+                for paragraph in cell.paragraphs:
+                    rel_ids = _paragraph_image_rel_ids(paragraph)
+                    if not rel_ids:
+                        continue
+                    for rel_id in rel_ids:
+                        file_name = relationship_to_name.get(rel_id, rel_id)
+                        output.append(
+                            _build_docx_image_metadata(
+                                image_index=len(output) + 1,
+                                source=file_name,
+                                location_type="table_cell",
+                                paragraph_index=row_index,
+                                table_index=table_index,
+                                nearby_text=cell_text,
+                                paragraph_text=paragraph.text.strip(),
+                                path=path,
+                                rel_id=rel_id,
+                                extra={
+                                    "row_index": row_index,
+                                    "cell_index": cell_index,
+                                },
+                            )
+                        )
+    return output
+
+
+def _docx_image_relationship_names(path: Path) -> dict[str, str]:
+    names: dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(path) as archive:
+            rels_name = "word/_rels/document.xml.rels"
+            if rels_name not in archive.namelist():
+                return names
+            rels_xml = archive.read(rels_name).decode("utf-8", errors="ignore")
+            for match in re.finditer(
+                r'Id="([^"]+)".+?Type="[^"]+/image".+?Target="([^"]+)"',
+                rels_xml,
+            ):
+                names[match.group(1)] = Path(match.group(2)).name
+    except Exception:
+        pass
+    return names
+
+
+def _paragraph_image_rel_ids(paragraph: Any) -> list[str]:
+    rel_ids: list[str] = []
+    try:
+        for blip in paragraph._p.iter():
+            embed = blip.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+            if embed:
+                rel_ids.append(embed)
+    except Exception:
+        return rel_ids
+    return rel_ids
+
+
+def _nearby_paragraph_text(paragraph_context: list[tuple[int, str, Any]], paragraph_index: int) -> str:
+    texts = [
+        text
+        for index, text, _ in paragraph_context
+        if abs(index - paragraph_index) <= 2 and text
+    ]
+    return " / ".join(texts)
+
+
+def _build_docx_image_metadata(
+    *,
+    image_index: int,
+    source: str,
+    location_type: str,
+    paragraph_index: int,
+    table_index: int | None,
+    nearby_text: str,
+    paragraph_text: str,
+    path: Path,
+    rel_id: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ocr_text = _ocr_docx_relationship_image(path, rel_id)
+    visual_guess = _guess_visual_content_type(ocr_text, nearby_text)
+    metadata = {
+        "index": image_index,
+        "source": source,
+        "location_type": location_type,
+        "paragraph_index": paragraph_index,
+        "table_index": table_index,
+        "paragraph_text": paragraph_text,
+        "nearby_text": nearby_text,
+        "ocr_text": ocr_text,
+        "visual_guess": visual_guess,
+        "vlm_status": "pending_external_vlm",
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
+
+
+def _ocr_docx_relationship_image(path: Path, rel_id: str) -> str:
+    rel_names = _docx_image_relationship_names(path)
+    file_name = rel_names.get(rel_id)
+    if not file_name:
+        return ""
+    try:
+        with TemporaryDirectory() as temp_dir, zipfile.ZipFile(path) as archive:
+            candidates = [
+                name
+                for name in archive.namelist()
+                if name.startswith("word/media/") and Path(name).name == file_name
+            ]
+            if not candidates:
+                return ""
+            target = Path(temp_dir) / file_name
+            target.write_bytes(archive.read(candidates[0]))
+            return _ocr_image_with_local_engines(target)
+    except Exception:
+        return ""
+
+
+def _guess_visual_content_type(ocr_text: str, nearby_text: str) -> str:
+    text = f"{ocr_text}\n{nearby_text}"
+    if re.search(r"公章|盖章|印章|有限公司|委员会|中心|局", text):
+        return "疑似公章/印章"
+    if re.search(r"签字|签名|法定代表人|授权代表|日期|年\s*月\s*日", text):
+        return "疑似签字/签署区域"
+    if re.search(r"流程|架构|示意|图|网络|系统", text):
+        return "疑似图表/架构图"
+    return "普通图片"
 
 
 def _extract_docx_images_ocr_fast(path: Path) -> str:

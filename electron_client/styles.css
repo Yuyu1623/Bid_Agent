@@ -382,15 +382,6 @@ button {
   text-overflow: ellipsis;
 }
 
-.status-select {
-  width: 92px;
-  padding: 6px 8px;
-  border: 1px solid #cdd9ea;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #10213d;
-}
-
 .table-danger-btn {
   min-width: 54px;
   padding: 6px 10px;

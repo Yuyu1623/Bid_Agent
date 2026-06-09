@@ -2,6 +2,7 @@
 """LLM client helpers for synchronous and asynchronous OpenAI-compatible calls."""
 
 import asyncio
+import json
 import os
 from typing import Dict, List, Optional, Sequence
 
@@ -76,6 +77,19 @@ class LLM_Invoke:
         _safe_print()
         return "".join(chunks)
 
+    def think_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema: Dict[str, object],
+        temperature: float = 0,
+    ) -> str:
+        """Call the model with JSON Schema response format when supported."""
+        _safe_print(f"\n[model json call] model={self.model}")
+        kwargs = self._completion_kwargs(messages, temperature)
+        kwargs["response_format"] = _json_schema_response_format(schema)
+        response = self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
+
     async def athink(
         self,
         messages: List[Dict[str, str]],
@@ -104,6 +118,19 @@ class LLM_Invoke:
         )
         return response.choices[0].message.content or ""
 
+    async def athink_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema: Dict[str, object],
+        temperature: float = 0,
+    ) -> str:
+        """Call the model asynchronously with JSON Schema response format."""
+        _safe_print(f"\n[async model json call] model={self.model}")
+        kwargs = self._completion_kwargs(messages, temperature)
+        kwargs["response_format"] = _json_schema_response_format(schema)
+        response = await self.async_client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
+
     async def astream(
         self,
         messages: List[Dict[str, str]],
@@ -130,7 +157,7 @@ class LLM_Invoke:
         stream: bool = False,
     ) -> List[str]:
         """Run multiple independent prompts concurrently and keep result order."""
-        concurrency = max_concurrency or int(os.getenv("LLM_MAX_CONCURRENCY", "5"))
+        concurrency = max_concurrency or int(os.getenv("LLM_MAX_CONCURRENCY", "2"))
         semaphore = asyncio.Semaphore(concurrency)
 
         async def run_one(messages: List[Dict[str, str]]) -> str:
@@ -200,3 +227,16 @@ class LLM_Invoke:
             return False
         model_name = (self.model or "").lower()
         return "qwen" in model_name or "deepseek-r1" in model_name
+
+
+def _json_schema_response_format(schema: Dict[str, object]) -> Dict[str, object]:
+    name = str(schema.get("title") or "bid_structured_extraction")
+    safe_name = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in name)[:64]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": safe_name or "bid_structured_extraction",
+            "schema": schema,
+            "strict": True,
+        },
+    }

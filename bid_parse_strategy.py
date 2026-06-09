@@ -97,9 +97,9 @@ def recommend_parse_method_from_profile(profile: dict) -> str:
             return "mineru_parallel_pages" if page_count >= 30 else "mineru_vlm"
         if pdf_type == "mixed_pdf":
             return "mineru_parallel_pages"
-        # Keep auto conservative on Windows: PyMuPDF4LLM/Docling are useful
-        # manual options, but their ONNX/torch stacks can be less predictable.
-        return "pdfplumber"
+        if pdf_type == "simple_text_pdf":
+            return "pdfplumber"
+        return "mineru_parallel_pages" if page_count >= 30 else "mineru_pipeline"
 
     if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         return "mineru_vlm"
@@ -242,9 +242,18 @@ def classify_pdf_profile(profile: dict) -> dict:
         label = "图文混排 PDF"
         layers = ["解析层：多模态解析", "结构还原层：页码、标题、章节、表格、图片说明"]
     else:
-        pdf_type = "native_text_pdf"
-        label = "原生文本 PDF"
-        layers = ["解析层：本地文本抽取", "结构还原层：页码、标题、章节、段落、表格"]
+        if (
+            text_chars_per_page >= 300
+            and int(profile.get("sample_table_count") or 0) == 0
+            and int(profile.get("page_count") or 0) <= 20
+        ):
+            pdf_type = "simple_text_pdf"
+            label = "极简纯文本 PDF"
+            layers = ["解析层：pdfplumber 轻量文本抽取", "结构还原层：标题、段落"]
+        else:
+            pdf_type = "native_text_pdf"
+            label = "原生复杂 PDF"
+            layers = ["解析层：MinerU 结构化解析", "结构还原层：页码、标题、章节、段落、表格"]
         if text_chars_per_page < 80:
             profile.setdefault("warnings", []).append("PDF 样本页文本较少，可能是封面/目录或文本层质量偏低。")
 
