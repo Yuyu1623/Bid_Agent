@@ -4,6 +4,20 @@
 from typing import Any, Dict, Iterable, List
 
 
+DEDUPLICATION_OUTPUT_RULES = """
+
+通用输出约束：
+- 相同或高度相似的条款、材料、表单、证明文件只输出一次，不要在同一模块中重复列出。
+- 如果原文同一材料在多个位置重复出现，请合并为一条，并在内容中保留关键限制条件。
+- 不要把大量材料名称堆在一个长句里；应按表格行或条目拆分。
+- 不要连续复读“投标人需提供……”类句式；相同材料名称出现一次即可。
+"""
+
+
+def _with_common_rules(system_prompt: str) -> str:
+    return f"{system_prompt.rstrip()}{DEDUPLICATION_OUTPUT_RULES}"
+
+
 PROJECT_OVERVIEW_SYSTEM_PROMPT = """你是专业的招标文件分析师。请从用户提供的招标文件内容中提取“投标人须知/项目概览”信息。
 
 请严格按下面 14 个字段输出，每个字段单独一行，格式为“字段名：内容”。除“是否专门面向中小微企业采购”和“是否为暗标”外，尽量保留招标文件原文表达；没有明确提及则写“未提及”。
@@ -117,7 +131,7 @@ PRICE_SCORING_USER_PROMPT_TEMPLATE = """请分析以下招标文件内容，提�
 def build_project_overview_messages(file_content: str) -> List[Dict[str, str]]:
     """Build chat messages for extracting a bid project's overview."""
     return [
-        {"role": "system", "content": PROJECT_OVERVIEW_SYSTEM_PROMPT},
+        {"role": "system", "content": _with_common_rules(PROJECT_OVERVIEW_SYSTEM_PROMPT)},
         {
             "role": "user",
             "content": PROJECT_OVERVIEW_USER_PROMPT_TEMPLATE.format(
@@ -138,7 +152,7 @@ def build_project_overview_messages_from_sections(
 def build_technical_scoring_messages(file_content: str) -> List[Dict[str, str]]:
     """Build chat messages for extracting technical requirements."""
     return [
-        {"role": "system", "content": TECHNICAL_SCORING_SYSTEM_PROMPT},
+        {"role": "system", "content": _with_common_rules(TECHNICAL_SCORING_SYSTEM_PROMPT)},
         {
             "role": "user",
             "content": TECHNICAL_SCORING_USER_PROMPT_TEMPLATE.format(
@@ -159,7 +173,7 @@ def build_technical_scoring_messages_from_sections(
 def build_qualification_compliance_messages(file_content: str) -> List[Dict[str, str]]:
     """Build messages for extracting qualification/compliance requirements."""
     return [
-        {"role": "system", "content": QUALIFICATION_COMPLIANCE_SYSTEM_PROMPT},
+        {"role": "system", "content": _with_common_rules(QUALIFICATION_COMPLIANCE_SYSTEM_PROMPT)},
         {
             "role": "user",
             "content": QUALIFICATION_COMPLIANCE_USER_PROMPT_TEMPLATE.format(
@@ -180,7 +194,7 @@ def build_qualification_compliance_messages_from_sections(
 def build_price_scoring_messages(file_content: str) -> List[Dict[str, str]]:
     """Build messages for extracting business and technical scoring."""
     return [
-        {"role": "system", "content": PRICE_SCORING_SYSTEM_PROMPT},
+        {"role": "system", "content": _with_common_rules(PRICE_SCORING_SYSTEM_PROMPT)},
         {
             "role": "user",
             "content": PRICE_SCORING_USER_PROMPT_TEMPLATE.format(
@@ -412,7 +426,7 @@ BUSINESS_SCORING_USER_PROMPT_TEMPLATE_V2 = """请分析以下招标文件内容�
 def build_business_content_messages(file_content: str) -> List[Dict[str, str]]:
     """Build messages for extracting business content."""
     return [
-        {"role": "system", "content": BUSINESS_CONTENT_SYSTEM_PROMPT_V2},
+        {"role": "system", "content": _with_common_rules(BUSINESS_CONTENT_SYSTEM_PROMPT_V2)},
         {
             "role": "user",
             "content": BUSINESS_CONTENT_USER_PROMPT_TEMPLATE_V2.format(
@@ -433,7 +447,7 @@ def build_business_content_messages_from_sections(
 def build_business_scoring_messages(file_content: str) -> List[Dict[str, str]]:
     """Build messages for extracting business and technical scoring."""
     return [
-        {"role": "system", "content": BUSINESS_SCORING_SYSTEM_PROMPT_V2},
+        {"role": "system", "content": _with_common_rules(BUSINESS_SCORING_SYSTEM_PROMPT_V2)},
         {
             "role": "user",
             "content": BUSINESS_SCORING_USER_PROMPT_TEMPLATE_V2.format(

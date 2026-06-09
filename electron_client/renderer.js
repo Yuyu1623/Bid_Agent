@@ -12,6 +12,39 @@ const stepKicker = document.querySelector("#stepKicker");
 const stepTitle = document.querySelector("#stepTitle");
 const contentCard = document.querySelector(".content-card");
 const generationTopPanel = document.querySelector("#generationTopPanel");
+const knowledgeWorkspace = document.querySelector("#knowledgeWorkspace");
+const projectWorkspace = document.querySelector("#projectWorkspace");
+const toolNavButtons = document.querySelectorAll("[data-tool-view]");
+const knowledgeTypes = document.querySelector("#knowledgeTypes");
+const knowledgeTypeTitle = document.querySelector("#knowledgeTypeTitle");
+const knowledgeTypeDesc = document.querySelector("#knowledgeTypeDesc");
+const knowledgeSearch = document.querySelector("#knowledgeSearch");
+const knowledgeList = document.querySelector("#knowledgeList");
+const knowledgeNewBtn = document.querySelector("#knowledgeNewBtn");
+const knowledgeSaveBtn = document.querySelector("#knowledgeSaveBtn");
+const knowledgeDeleteBtn = document.querySelector("#knowledgeDeleteBtn");
+const knowledgeExportBtn = document.querySelector("#knowledgeExportBtn");
+const knowledgeImportBtn = document.querySelector("#knowledgeImportBtn");
+const knowledgeImportFile = document.querySelector("#knowledgeImportFile");
+const knowledgeEditorTitle = document.querySelector("#knowledgeEditorTitle");
+const knowledgeEditorHint = document.querySelector("#knowledgeEditorHint");
+const knowledgeStatus = document.querySelector("#knowledgeStatus");
+const knowledgeTitle = document.querySelector("#knowledgeTitle");
+const knowledgeTags = document.querySelector("#knowledgeTags");
+const knowledgeDate = document.querySelector("#knowledgeDate");
+const knowledgeFiles = document.querySelector("#knowledgeFiles");
+const knowledgeContent = document.querySelector("#knowledgeContent");
+const knowledgeNotes = document.querySelector("#knowledgeNotes");
+const projectRefreshBtn = document.querySelector("#projectRefreshBtn");
+const projectDeleteBtn = document.querySelector("#projectDeleteBtn");
+const projectSearch = document.querySelector("#projectSearch");
+const projectList = document.querySelector("#projectList");
+const projectListHint = document.querySelector("#projectListHint");
+const projectDetailTitle = document.querySelector("#projectDetailTitle");
+const projectDetailHint = document.querySelector("#projectDetailHint");
+const projectSummary = document.querySelector("#projectSummary");
+const projectTabs = document.querySelector("#projectTabs");
+const projectTableContent = document.querySelector("#projectTableContent");
 const noticeFields = document.querySelector("#noticeFields");
 const businessOutput = document.querySelector("#businessOutput");
 const technicalOutput = document.querySelector("#technicalOutput");
@@ -38,6 +71,68 @@ let activeViewerTarget = null;
 let parseStartTime = 0;
 let lastAnalysisResult = {};
 let lastParsedSections = [];
+let activeToolView = "parse";
+let activeKnowledgeType = "company";
+let activeKnowledgeId = null;
+let projectStore = [];
+let activeProjectId = null;
+let activeProjectDetail = null;
+let activeProjectTable = "project_profile";
+
+const KNOWLEDGE_STORAGE_KEY = "dowell_bid_knowledge_base_v1";
+
+const KNOWLEDGE_TYPES = [
+  {
+    id: "company",
+    title: "公司信息",
+    desc: "公司简介、联系方式、经营范围、组织能力、服务承诺等。",
+    icon: "企"
+  },
+  {
+    id: "qualification",
+    title: "资质管理",
+    desc: "营业执照、资质证书、体系认证、授权文件和有效期。",
+    icon: "证"
+  },
+  {
+    id: "personnel",
+    title: "人员信息",
+    desc: "项目经理、技术负责人、团队成员、证书、履历和项目经验。",
+    icon: "人"
+  },
+  {
+    id: "finance",
+    title: "财务信息",
+    desc: "审计报告、财务指标、纳税社保、银行资信和财务承诺。",
+    icon: "财"
+  },
+  {
+    id: "performance",
+    title: "业绩信息",
+    desc: "历史项目业绩、合同金额、客户类型、验收情况和证明材料。",
+    icon: "绩"
+  },
+  {
+    id: "cases",
+    title: "历史案例库",
+    desc: "相似项目案例、投标复盘、得失分经验和风险处理记录。",
+    icon: "案"
+  },
+  {
+    id: "bidFiles",
+    title: "历史投标文件",
+    desc: "历史商务标、技术标、响应表、偏离表和终稿文件索引。",
+    icon: "标"
+  },
+  {
+    id: "materials",
+    title: "方案素材库",
+    desc: "服务方案、技术方案、实施计划、售后运维、质量保障等可复用素材。",
+    icon: "素"
+  }
+];
+
+let knowledgeStore = loadKnowledgeStore();
 
 const PARSE_METHOD_LABELS = {
   auto: "智能推荐解析",
@@ -80,6 +175,115 @@ const DEEP_THINKING_MODELS = new Set([
   "DeepSeek-R1-Distill-Qwen-7B (轻量)"
 ]);
 
+const PROJECT_TABLE_COLUMNS = {
+  project_profile: [
+    ["project_name", "项目名称"],
+    ["project_code", "项目编号"],
+    ["project_category", "类别"],
+    ["budget_text", "预算"],
+    ["buyer_name", "招标人"],
+    ["agency_name", "代理机构"],
+    ["confirmed_status", "状态"]
+  ],
+  business_requirements: [
+    ["source_heading", "所属标题"],
+    ["item_sequence", "序号"],
+    ["requirement_type", "类型"],
+    ["item_name", "条款"],
+    ["requirement_text", "要求"],
+    ["confirmed_status", "状态"]
+  ],
+  technical_requirements: [
+    ["source_heading", "所属标题"],
+    ["item_sequence", "序号"],
+    ["requirement_group", "分组"],
+    ["item_name", "项目"],
+    ["requirement_text", "要求"],
+    ["confirmed_status", "状态"]
+  ],
+  qualification_requirements: [
+    ["source_heading", "所属标题"],
+    ["review_type", "审查类型"],
+    ["sequence_no", "序号"],
+    ["requirement_text", "资格要求"],
+    ["required_materials", "需提供资料"],
+    ["confirmed_status", "状态"]
+  ],
+  rejection_items: [
+    ["source_heading", "所属标题"],
+    ["sequence_no", "序号"],
+    ["rejection_item", "废标项"],
+    ["specific_behavior", "具体表现"],
+    ["risk_level", "风险"],
+    ["confirmed_status", "状态"]
+  ],
+  scoring_items: [
+    ["source_heading", "所属标题"],
+    ["score_type", "评分类型"],
+    ["item_name", "评分项"],
+    ["scoring_standard", "评分标准"],
+    ["score_text", "分数"],
+    ["confirmed_status", "状态"]
+  ],
+  review_findings: [
+    ["review_type", "审查类型"],
+    ["module", "模块"],
+    ["risk_level", "风险"],
+    ["finding_title", "发现"],
+    ["finding_detail", "详情"],
+    ["status", "状态"]
+  ],
+  source_documents: [
+    ["document_type", "类型"],
+    ["file_name", "文件名"],
+    ["parse_method", "解析方式"],
+    ["parse_status", "解析状态"],
+    ["created_at", "创建时间"]
+  ],
+  document_sections: [
+    ["section_index", "序号"],
+    ["title", "标题"],
+    ["section_type", "章节类型"],
+    ["plain_text", "内容摘要"]
+  ],
+  document_chunks: [
+    ["chunk_index", "序号"],
+    ["chunk_type", "切片类型"],
+    ["module", "模块"],
+    ["title_path", "标题路径"],
+    ["content", "切片内容"],
+    ["confirmed_status", "状态"]
+  ],
+  extraction_runs: [
+    ["run_type", "任务类型"],
+    ["status", "状态"],
+    ["started_at", "开始时间"],
+    ["finished_at", "结束时间"]
+  ]
+};
+
+const CONFIRMABLE_PROJECT_TABLES = new Set([
+  "project_profile",
+  "business_requirements",
+  "technical_requirements",
+  "qualification_requirements",
+  "rejection_items",
+  "scoring_items",
+  "document_chunks"
+]);
+
+const DELETABLE_PROJECT_TABLES = new Set([
+  "project_profile",
+  "business_requirements",
+  "technical_requirements",
+  "qualification_requirements",
+  "rejection_items",
+  "scoring_items",
+  "review_findings",
+  "document_sections",
+  "document_chunks"
+]);
+
 chooseFileBtn.addEventListener("click", () => fileInput.click());
 
 parseMethod.addEventListener("change", () => {
@@ -89,6 +293,27 @@ parseMethod.addEventListener("change", () => {
 
 llmModel.addEventListener("change", syncDeepThinkingOption);
 contentReviewModel?.addEventListener("change", syncContentReviewDeepThinkingOption);
+
+toolNavButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    setActiveToolView(button.dataset.toolView || "parse");
+  });
+});
+
+knowledgeNewBtn?.addEventListener("click", () => {
+  clearKnowledgeEditor();
+  knowledgeTitle.focus();
+});
+
+knowledgeSaveBtn?.addEventListener("click", saveKnowledgeEntry);
+knowledgeDeleteBtn?.addEventListener("click", deleteKnowledgeEntry);
+knowledgeSearch?.addEventListener("input", renderKnowledgeList);
+knowledgeExportBtn?.addEventListener("click", exportKnowledgeBase);
+knowledgeImportBtn?.addEventListener("click", () => knowledgeImportFile?.click());
+knowledgeImportFile?.addEventListener("change", importKnowledgeBase);
+projectRefreshBtn?.addEventListener("click", () => loadProjectsFromBackend());
+projectDeleteBtn?.addEventListener("click", deleteActiveProject);
+projectSearch?.addEventListener("input", () => loadProjectsFromBackend(projectSearch.value.trim()));
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files[0];
@@ -248,6 +473,13 @@ document.querySelectorAll("[data-expand]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-edit]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = document.querySelector(`#${button.dataset.edit}`);
+    openEditor(button.dataset.title || "内容编辑", getTargetText(target), target);
+  });
+});
+
 document.querySelectorAll("[data-export]").forEach((button) => {
   button.addEventListener("click", () => {
     const target = document.querySelector(`#${button.dataset.export}`);
@@ -265,10 +497,10 @@ viewerCopyBtn.addEventListener("click", async () => {
 });
 
 viewerSaveBtn.addEventListener("click", () => {
-  if (!activeViewerTarget || !("value" in activeViewerTarget)) {
+  if (!activeViewerTarget) {
     return;
   }
-  activeViewerTarget.value = viewerText.value || "";
+  saveViewerTextToTarget(activeViewerTarget, viewerText.value || "");
   flashButton(viewerSaveBtn, "已保存");
 });
 
@@ -683,7 +915,637 @@ function setWorkflowStep(step) {
   });
   reviewDoneBtn.classList.toggle("visible", step === 2);
   submitBtn.classList.toggle("hidden", step !== 1);
-  generationTopPanel.classList.toggle("visible", step === 3);
+  generationTopPanel.classList.toggle("visible", step === 3 && activeToolView === "parse");
+}
+
+async function setActiveToolView(view) {
+  activeToolView = view;
+  toolNavButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.toolView === view);
+  });
+
+  const showKnowledge = view === "knowledge";
+  const showProjects = view === "projects";
+  const showDataWorkspace = showKnowledge || showProjects;
+  document.querySelector(".workspace").classList.toggle("knowledge-mode", showDataWorkspace);
+  form.classList.toggle("hidden", showDataWorkspace);
+  generationTopPanel.classList.toggle("hidden", showDataWorkspace);
+  contentCard.classList.toggle("hidden", showDataWorkspace);
+  knowledgeWorkspace.classList.toggle("hidden", !showKnowledge);
+  projectWorkspace?.classList.toggle("hidden", !showProjects);
+
+  if (showKnowledge) {
+    await loadKnowledgeFromBackend();
+    renderKnowledgeTypes();
+    renderKnowledgeList();
+    if (!activeKnowledgeId) {
+      clearKnowledgeEditor();
+    }
+  } else if (showProjects) {
+    await loadProjectsFromBackend();
+    if (!activeProjectId) {
+      renderEmptyProjectDetail();
+    }
+  } else if (view !== "parse") {
+    statusText.textContent = "该模块已预留入口，当前请先使用招标解析和知识库。";
+  } else {
+    setWorkflowStep(Number(document.querySelector(".flow-step.active")?.dataset.flowStep || 1));
+  }
+}
+
+async function loadProjectsFromBackend(query = projectSearch?.value?.trim() || "") {
+  const apiBase = getApiBase();
+  if (projectListHint) {
+    projectListHint.textContent = "正在读取 SQLite 项目库...";
+  }
+  try {
+    await ensureBackendReady(apiBase);
+    const url = new URL(`${apiBase}/projects`);
+    if (query) {
+      url.searchParams.set("q", query);
+    }
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const data = await response.json();
+    projectStore = data.projects || [];
+    renderProjectList();
+    if (activeProjectId && projectStore.some((item) => item.id === activeProjectId)) {
+      await loadProjectDetail(activeProjectId);
+    } else if (projectStore.length) {
+      await loadProjectDetail(projectStore[0].id);
+    } else {
+      activeProjectId = null;
+      renderEmptyProjectDetail();
+    }
+    if (projectListHint) {
+      projectListHint.textContent = `已读取 ${projectStore.length} 个项目。`;
+    }
+  } catch (error) {
+    projectStore = [];
+    renderProjectList();
+    renderEmptyProjectDetail(`项目库读取失败：${error.message}`);
+    if (projectListHint) {
+      projectListHint.textContent = "项目库读取失败，请确认后端已启动。";
+    }
+  }
+}
+
+function renderProjectList() {
+  if (!projectList) {
+    return;
+  }
+  if (!projectStore.length) {
+    projectList.innerHTML = `<div class="empty-state">暂无入库项目，先完成一次招标解析。</div>`;
+    return;
+  }
+  projectList.innerHTML = projectStore
+    .map((project) => {
+      const active = project.id === activeProjectId ? " active" : "";
+      const meta = [
+        project.projectCode,
+        project.buyerName,
+        `${project.documentCount || 0} 文件`,
+        `${project.chunkCount || 0} 切片`
+      ].filter(Boolean).join(" · ");
+      return `
+        <button class="knowledge-item project-item${active}" type="button" data-project-id="${escapeHtml(project.id)}">
+          <strong>${escapeHtml(project.projectName || "未命名项目")}</strong>
+          <span>${escapeHtml(meta || "暂无补充信息")}</span>
+          <small>${escapeHtml(project.status || "待核对")}</small>
+        </button>
+      `;
+    })
+    .join("");
+  projectList.querySelectorAll("[data-project-id]").forEach((button) => {
+    button.addEventListener("click", () => loadProjectDetail(button.dataset.projectId));
+  });
+}
+
+async function loadProjectDetail(projectId) {
+  if (!projectId) {
+    renderEmptyProjectDetail();
+    return;
+  }
+  const apiBase = getApiBase();
+  activeProjectId = projectId;
+  renderProjectList();
+  try {
+    const response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}`);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    activeProjectDetail = await response.json();
+    const firstAvailable = Object.entries(activeProjectDetail.tables || {})
+      .find(([, table]) => (table.rows || []).length > 0)?.[0];
+    if (!activeProjectTable || !activeProjectDetail.tables?.[activeProjectTable]) {
+      activeProjectTable = firstAvailable || "project_profile";
+    }
+    renderProjectDetail();
+  } catch (error) {
+    renderEmptyProjectDetail(`项目详情读取失败：${error.message}`);
+  }
+}
+
+function renderEmptyProjectDetail(message = "选择左侧项目后查看结构化抽取结果。") {
+  activeProjectDetail = null;
+  projectDeleteBtn?.classList.add("hidden");
+  if (projectDetailTitle) {
+    projectDetailTitle.textContent = "请选择项目";
+  }
+  if (projectDetailHint) {
+    projectDetailHint.textContent = message;
+  }
+  if (projectSummary) {
+    projectSummary.innerHTML = "";
+  }
+  if (projectTabs) {
+    projectTabs.innerHTML = "";
+  }
+  if (projectTableContent) {
+    projectTableContent.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+  }
+}
+
+function renderProjectDetail() {
+  if (!activeProjectDetail) {
+    renderEmptyProjectDetail();
+    return;
+  }
+  const project = activeProjectDetail.project || {};
+  projectDeleteBtn?.classList.remove("hidden");
+  projectDetailTitle.textContent = project.project_name || "未命名项目";
+  projectDetailHint.textContent = [
+    project.project_code,
+    project.buyer_name,
+    project.agency_name
+  ].filter(Boolean).join(" · ") || "结构化抽取结果";
+
+  projectSummary.innerHTML = `
+    <div><span>项目编号</span><strong>${escapeHtml(project.project_code || "未提取")}</strong></div>
+    <div><span>项目类别</span><strong>${escapeHtml(project.project_category || "未提取")}</strong></div>
+    <div><span>预算金额</span><strong>${escapeHtml(formatProjectValue(project.budget_amount))}</strong></div>
+    <div><span>状态</span><strong>${escapeHtml(project.status || "待核对")}</strong></div>
+  `;
+
+  renderProjectTabs();
+  renderProjectTable();
+}
+
+function renderProjectTabs() {
+  const tables = activeProjectDetail?.tables || {};
+  projectTabs.innerHTML = Object.entries(tables)
+    .map(([tableName, table]) => {
+      const active = tableName === activeProjectTable ? " active" : "";
+      const count = (table.rows || []).length;
+      return `<button class="module-tab${active}" type="button" data-project-table="${escapeHtml(tableName)}">${escapeHtml(table.title || tableName)} ${count}</button>`;
+    })
+    .join("");
+  projectTabs.querySelectorAll("[data-project-table]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeProjectTable = button.dataset.projectTable;
+      renderProjectTabs();
+      renderProjectTable();
+    });
+  });
+}
+
+function renderProjectTable() {
+  const table = activeProjectDetail?.tables?.[activeProjectTable];
+  if (!table) {
+    projectTableContent.innerHTML = `<div class="empty-state">暂无表数据。</div>`;
+    return;
+  }
+  const rows = table.rows || [];
+  if (!rows.length) {
+    projectTableContent.innerHTML = `<div class="empty-state">${escapeHtml(table.title)} 暂无数据。</div>`;
+    return;
+  }
+  const columns = PROJECT_TABLE_COLUMNS[activeProjectTable] || Object.keys(rows[0]).slice(0, 6).map((key) => [key, key]);
+  const actionHeader = CONFIRMABLE_PROJECT_TABLES.has(activeProjectTable) ? "<th>确认</th>" : "";
+  const deleteHeader = DELETABLE_PROJECT_TABLES.has(activeProjectTable) ? "<th>删除</th>" : "";
+  projectTableContent.innerHTML = `
+    <div class="project-table-wrap">
+      <table class="project-data-table">
+        <thead>
+          <tr>${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("")}${actionHeader}${deleteHeader}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => renderProjectTableRow(row, columns)).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+  projectTableContent.querySelectorAll("[data-confirm-record]").forEach((select) => {
+    select.addEventListener("change", () => {
+      updateProjectRecordStatus(activeProjectTable, select.dataset.confirmRecord, select.value);
+    });
+  });
+  projectTableContent.querySelectorAll("[data-delete-record]").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteProjectRecord(activeProjectTable, button.dataset.deleteRecord);
+    });
+  });
+}
+
+function renderProjectTableRow(row, columns) {
+  const actionCell = CONFIRMABLE_PROJECT_TABLES.has(activeProjectTable)
+    ? `<td>
+        <select class="status-select" data-confirm-record="${escapeHtml(row.id)}">
+          ${["未确认", "已确认", "需复核"].map((status) => (
+            `<option value="${status}"${(row.confirmed_status || "未确认") === status ? " selected" : ""}>${status}</option>`
+          )).join("")}
+        </select>
+      </td>`
+    : "";
+  const deleteCell = DELETABLE_PROJECT_TABLES.has(activeProjectTable)
+    ? `<td><button class="table-danger-btn" type="button" data-delete-record="${escapeHtml(row.id)}">删除</button></td>`
+    : "";
+  return `
+    <tr>
+      ${columns.map(([key]) => `<td title="${escapeHtml(projectCellValue(row[key]))}">${escapeHtml(projectCellValue(row[key]))}</td>`).join("")}
+      ${actionCell}
+      ${deleteCell}
+    </tr>
+  `;
+}
+
+async function deleteActiveProject() {
+  if (!activeProjectId || !activeProjectDetail?.project) {
+    return;
+  }
+  const projectName = activeProjectDetail.project.project_name || "未命名项目";
+  const confirmed = window.confirm(`确认删除项目“${projectName}”吗？该操作会同时删除该项目下的章节、切片、条款、评分项和审查发现。`);
+  if (!confirmed) {
+    return;
+  }
+  const apiBase = getApiBase();
+  try {
+    const response = await fetch(`${apiBase}/projects/${encodeURIComponent(activeProjectId)}`, {
+      method: "DELETE"
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    activeProjectId = null;
+    activeProjectDetail = null;
+    await loadProjectsFromBackend();
+  } catch (error) {
+    statusText.textContent = `项目删除失败：${error.message}`;
+  }
+}
+
+async function deleteProjectRecord(tableName, recordId) {
+  if (!recordId) {
+    return;
+  }
+  const confirmed = window.confirm("确认删除这条数据吗？该操作不可撤销。");
+  if (!confirmed) {
+    return;
+  }
+  const apiBase = getApiBase();
+  try {
+    const response = await fetch(`${apiBase}/projects/records/${encodeURIComponent(tableName)}/${encodeURIComponent(recordId)}`, {
+      method: "DELETE"
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    await loadProjectDetail(activeProjectId);
+  } catch (error) {
+    statusText.textContent = `单条数据删除失败：${error.message}`;
+  }
+}
+
+async function updateProjectRecordStatus(tableName, recordId, status) {
+  const apiBase = getApiBase();
+  try {
+    const response = await fetch(`${apiBase}/projects/records/${encodeURIComponent(tableName)}/${encodeURIComponent(recordId)}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status })
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    await loadProjectDetail(activeProjectId);
+  } catch (error) {
+    statusText.textContent = `确认状态更新失败：${error.message}`;
+  }
+}
+
+function projectCellValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "未提取";
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  const text = String(value).replace(/\s+/g, " ").trim();
+  return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+}
+
+function formatProjectValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "未提取";
+  }
+  return Number.isFinite(Number(value)) ? Number(value).toLocaleString("zh-CN") : String(value);
+}
+
+function createEmptyKnowledgeStore() {
+  return KNOWLEDGE_TYPES.reduce((store, type) => {
+    store[type.id] = [];
+    return store;
+  }, {});
+}
+
+function loadKnowledgeStore() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(KNOWLEDGE_STORAGE_KEY) || "{}");
+    return { ...createEmptyKnowledgeStore(), ...parsed };
+  } catch {
+    return createEmptyKnowledgeStore();
+  }
+}
+
+function persistKnowledgeStore() {
+  localStorage.setItem(KNOWLEDGE_STORAGE_KEY, JSON.stringify(knowledgeStore));
+}
+
+async function loadKnowledgeFromBackend() {
+  const apiBase = getApiBase();
+  try {
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/knowledge/entries`);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const data = await response.json();
+    knowledgeStore = createEmptyKnowledgeStore();
+    (data.entries || []).forEach((entry) => {
+      if (!knowledgeStore[entry.type]) {
+        knowledgeStore[entry.type] = [];
+      }
+      knowledgeStore[entry.type].push(normalizeKnowledgeEntry(entry));
+    });
+    persistKnowledgeStore();
+    knowledgeStatus.textContent = "已连接后端 SQLite 知识库。";
+  } catch {
+    knowledgeStore = loadKnowledgeStore();
+    knowledgeStatus.textContent = "后端不可用，当前使用前端本地知识库。";
+  }
+}
+
+function normalizeKnowledgeEntry(entry) {
+  return {
+    id: entry.id,
+    type: entry.type,
+    title: entry.title || "",
+    tags: entry.tags || "",
+    date: entry.date || entry.dateText || "",
+    files: entry.files || "",
+    content: entry.content || "",
+    notes: entry.notes || "",
+    createdAt: entry.createdAt || entry.created_at || "",
+    updatedAt: entry.updatedAt || entry.updated_at || ""
+  };
+}
+
+function renderKnowledgeTypes() {
+  knowledgeTypes.innerHTML = "";
+  KNOWLEDGE_TYPES.forEach((type) => {
+    const count = (knowledgeStore[type.id] || []).length;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `knowledge-type ${type.id === activeKnowledgeType ? "active" : ""}`;
+    button.innerHTML = `
+      <span>${escapeHtml(type.icon)}</span>
+      <strong>${escapeHtml(type.title)}</strong>
+      <small>${count} 条</small>
+    `;
+    button.addEventListener("click", () => {
+      activeKnowledgeType = type.id;
+      activeKnowledgeId = null;
+      renderKnowledgeTypes();
+      renderKnowledgeList();
+      clearKnowledgeEditor();
+    });
+    knowledgeTypes.appendChild(button);
+  });
+}
+
+function renderKnowledgeList() {
+  const type = KNOWLEDGE_TYPES.find((item) => item.id === activeKnowledgeType) || KNOWLEDGE_TYPES[0];
+  const query = (knowledgeSearch.value || "").trim().toLowerCase();
+  const entries = (knowledgeStore[activeKnowledgeType] || []).filter((entry) => {
+    const haystack = [entry.title, entry.tags, entry.date, entry.files, entry.content, entry.notes]
+      .join(" ")
+      .toLowerCase();
+    return !query || haystack.includes(query);
+  });
+
+  knowledgeTypeTitle.textContent = type.title;
+  knowledgeTypeDesc.textContent = type.desc;
+  knowledgeList.innerHTML = "";
+
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "knowledge-empty";
+    empty.textContent = "暂无条目，点击新建开始沉淀知识。";
+    knowledgeList.appendChild(empty);
+    return;
+  }
+
+  entries
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .forEach((entry) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = `knowledge-entry ${entry.id === activeKnowledgeId ? "active" : ""}`;
+      card.innerHTML = `
+        <strong>${escapeHtml(entry.title || "未命名条目")}</strong>
+        <span>${escapeHtml(entry.tags || "未设置标签")}</span>
+        <small>${escapeHtml(entry.date || "未设置时间")} ｜ ${escapeHtml(formatKnowledgeTime(entry.updatedAt))}</small>
+      `;
+      card.addEventListener("click", () => loadKnowledgeEntry(entry.id));
+      knowledgeList.appendChild(card);
+    });
+}
+
+function clearKnowledgeEditor() {
+  activeKnowledgeId = null;
+  knowledgeEditorTitle.textContent = "新建知识条目";
+  knowledgeEditorHint.textContent = "填写后保存到本地知识库。";
+  knowledgeDeleteBtn.classList.add("hidden");
+  knowledgeTitle.value = "";
+  knowledgeTags.value = "";
+  knowledgeDate.value = "";
+  knowledgeFiles.value = "";
+  knowledgeContent.value = "";
+  knowledgeNotes.value = "";
+  knowledgeStatus.textContent = "本地保存，暂不上传服务器。";
+  renderKnowledgeList();
+}
+
+function loadKnowledgeEntry(id) {
+  const entry = (knowledgeStore[activeKnowledgeType] || []).find((item) => item.id === id);
+  if (!entry) {
+    return;
+  }
+  activeKnowledgeId = id;
+  knowledgeEditorTitle.textContent = "编辑知识条目";
+  knowledgeEditorHint.textContent = `${getKnowledgeTypeTitle(activeKnowledgeType)} ｜ ${formatKnowledgeTime(entry.updatedAt)}`;
+  knowledgeDeleteBtn.classList.remove("hidden");
+  knowledgeTitle.value = entry.title || "";
+  knowledgeTags.value = entry.tags || "";
+  knowledgeDate.value = entry.date || "";
+  knowledgeFiles.value = entry.files || "";
+  knowledgeContent.value = entry.content || "";
+  knowledgeNotes.value = entry.notes || "";
+  knowledgeStatus.textContent = "已载入，可修改后保存。";
+  renderKnowledgeList();
+}
+
+async function saveKnowledgeEntry() {
+  const title = knowledgeTitle.value.trim();
+  if (!title) {
+    knowledgeStatus.textContent = "请先填写标题 / 名称。";
+    knowledgeTitle.focus();
+    return;
+  }
+  const now = new Date().toISOString();
+  const entries = knowledgeStore[activeKnowledgeType] || [];
+  const payload = {
+    id: activeKnowledgeId || `kb_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    type: activeKnowledgeType,
+    title,
+    tags: knowledgeTags.value.trim(),
+    date: knowledgeDate.value.trim(),
+    files: knowledgeFiles.value.trim(),
+    content: knowledgeContent.value.trim(),
+    notes: knowledgeNotes.value.trim(),
+    createdAt: activeKnowledgeId
+      ? entries.find((item) => item.id === activeKnowledgeId)?.createdAt || now
+      : now,
+    updatedAt: now
+  };
+
+  let savedPayload = payload;
+  let saveMessage = "已保存到前端本地知识库。";
+  try {
+    const apiBase = getApiBase();
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/knowledge/entries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const data = await response.json();
+    savedPayload = normalizeKnowledgeEntry(data.entry || payload);
+    saveMessage = "已保存到后端 SQLite 知识库。";
+  } catch {
+    saveMessage = "后端不可用，已保存到前端本地知识库。";
+  }
+
+  const index = entries.findIndex((item) => item.id === savedPayload.id);
+  if (index >= 0) {
+    entries[index] = savedPayload;
+  } else {
+    entries.unshift(savedPayload);
+  }
+  knowledgeStore[activeKnowledgeType] = entries;
+  activeKnowledgeId = savedPayload.id;
+  persistKnowledgeStore();
+  renderKnowledgeTypes();
+  renderKnowledgeList();
+  loadKnowledgeEntry(savedPayload.id);
+  knowledgeStatus.textContent = saveMessage;
+}
+
+async function deleteKnowledgeEntry() {
+  if (!activeKnowledgeId) {
+    return;
+  }
+  try {
+    const apiBase = getApiBase();
+    await ensureBackendReady(apiBase);
+    await fetch(`${apiBase}/knowledge/entries/${encodeURIComponent(activeKnowledgeId)}`, {
+      method: "DELETE"
+    });
+  } catch {
+  }
+  knowledgeStore[activeKnowledgeType] = (knowledgeStore[activeKnowledgeType] || []).filter(
+    (entry) => entry.id !== activeKnowledgeId
+  );
+  persistKnowledgeStore();
+  renderKnowledgeTypes();
+  clearKnowledgeEditor();
+  knowledgeStatus.textContent = "已删除。";
+}
+
+async function exportKnowledgeBase() {
+  let store = knowledgeStore;
+  try {
+    const apiBase = getApiBase();
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/knowledge/export`);
+    if (response.ok) {
+      const data = await response.json();
+      store = data.store || store;
+    }
+  } catch {
+  }
+  exportText(`Dowell知识库-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(store, null, 2));
+}
+
+function importKnowledgeBase(event) {
+  const file = event.target.files?.[0];
+  if (!file) {
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const imported = JSON.parse(String(reader.result || "{}"));
+      knowledgeStore = { ...createEmptyKnowledgeStore(), ...(imported.store || imported) };
+      try {
+        const apiBase = getApiBase();
+        await ensureBackendReady(apiBase);
+        await fetch(`${apiBase}/knowledge/import`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ store: knowledgeStore })
+        });
+      } catch {
+      }
+      persistKnowledgeStore();
+      activeKnowledgeId = null;
+      renderKnowledgeTypes();
+      renderKnowledgeList();
+      clearKnowledgeEditor();
+      knowledgeStatus.textContent = "知识库导入完成。";
+    } catch (error) {
+      knowledgeStatus.textContent = `导入失败：${error.message || error}`;
+    } finally {
+      knowledgeImportFile.value = "";
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+
+function getKnowledgeTypeTitle(typeId) {
+  return KNOWLEDGE_TYPES.find((item) => item.id === typeId)?.title || "知识库";
+}
+
+function formatKnowledgeTime(value) {
+  if (!value) {
+    return "未保存";
+  }
+  return String(value).slice(0, 16).replace("T", " ");
 }
 
 function setParsedSections(sections) {
@@ -989,7 +1851,6 @@ function renderNotice(text) {
     const title = document.createElement("span");
     title.textContent = label;
     const input = document.createElement("textarea");
-    input.readOnly = true;
     input.value = pickValue(map, key) || "";
     input.placeholder = "未提取到";
     field.append(title, input);
@@ -998,7 +1859,7 @@ function renderNotice(text) {
 
   NOTICE_BOOLEAN_FIELDS.forEach(([key, label]) => {
     const field = document.createElement("div");
-    field.className = "field-block boolean-field readonly";
+    field.className = "field-block boolean-field";
     field.dataset.label = label;
     const title = document.createElement("span");
     title.textContent = label;
@@ -1008,10 +1869,13 @@ function renderNotice(text) {
     ["是", "否"].forEach((value) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.disabled = true;
       button.textContent = value;
       button.dataset.value = value;
       button.classList.toggle("active", current === value);
+      button.addEventListener("click", () => {
+        controls.querySelectorAll("button").forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+      });
       controls.appendChild(button);
     });
     field.append(title, controls);
@@ -1378,6 +2242,56 @@ function openViewer(title, text, target = null) {
   viewerModal.classList.add("open");
   viewerModal.setAttribute("aria-hidden", "false");
   setTimeout(() => (richHtml ? viewerRich.focus() : viewerText.focus()), 0);
+}
+
+function openEditor(title, text, target = null) {
+  activeViewerTarget = target || null;
+  viewerTitle.textContent = title;
+  viewerRich.innerHTML = "";
+  viewerRich.hidden = true;
+  viewerText.hidden = false;
+  viewerText.value = text || "";
+  viewerText.readOnly = false;
+  viewerSaveBtn.classList.remove("hidden");
+  viewerModal.classList.add("open");
+  viewerModal.setAttribute("aria-hidden", "false");
+  setTimeout(() => viewerText.focus(), 0);
+}
+
+function saveViewerTextToTarget(target, text) {
+  if (!target) {
+    return;
+  }
+  if ("value" in target) {
+    target.value = text;
+    return;
+  }
+  if (target.id === "businessOutput") {
+    renderBusinessContent(text);
+    return;
+  }
+  if (target.id === "technicalOutput") {
+    renderTechnicalContent(text);
+    return;
+  }
+  if (target.id === "contentReviewOutput") {
+    renderContentReviewContent(text);
+    return;
+  }
+  if (target.id === "qualificationTables") {
+    renderQualification(text);
+    return;
+  }
+  if (target.id === "scoringTables") {
+    renderScoring(text);
+    return;
+  }
+  if (target.id === "parsedMarkdownOutput") {
+    setImageAnalysisDisplay(text);
+    return;
+  }
+  target.dataset.rawText = text;
+  target.textContent = text;
 }
 
 function closeViewer() {

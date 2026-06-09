@@ -30,6 +30,24 @@ from bid_parse_strategy import (
     resolve_parse_method,
 )
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_database import (
+    DB_PATH,
+    KNOWLEDGE_TYPES,
+    delete_knowledge_entry,
+    delete_project,
+    delete_project_record,
+    export_knowledge_store,
+    import_knowledge_store,
+    init_database,
+    get_project_detail,
+    list_knowledge_entries,
+    list_database_tables,
+    list_projects,
+    save_analysis_result,
+    update_record_confirmed_status,
+    upsert_knowledge_entry,
+)
+from extraction_cleaner import clean_analysis_dict, clean_repeated_extraction_text
 from llm_client import LLM_Invoke
 from llm_model_config import apply_llm_env_selection
 
@@ -43,7 +61,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BACKEND_BUILD = "2026-06-08-wide-retrieval-v1"
+BACKEND_BUILD = "2026-06-09-extraction-dedupe-v1"
+
+
+@app.on_event("startup")
+def _startup_init_database() -> None:
+    init_database()
 
 
 def _raise_api_error(exc: Exception) -> None:
@@ -225,16 +248,27 @@ def _analyze_sections(
         )
         price_scoring_requirements = llm.think(messages_batch[4], stream=stream_output)
 
-    return BidAnalysisResult(
+    result = BidAnalysisResult(
         sections=sections,
-        project_overview=project_overview,
-        business_content=business_content,
-        technical_scoring_requirements=technical_scoring_requirements,
-        qualification_compliance_requirements=qualification_compliance_requirements,
-        price_scoring_requirements=price_scoring_requirements,
+        project_overview=clean_repeated_extraction_text(project_overview),
+        business_content=clean_repeated_extraction_text(business_content),
+        technical_scoring_requirements=clean_repeated_extraction_text(technical_scoring_requirements),
+        qualification_compliance_requirements=clean_repeated_extraction_text(qualification_compliance_requirements),
+        price_scoring_requirements=clean_repeated_extraction_text(price_scoring_requirements),
         content_review_markdown="内容审查尚未执行，请在前端点击“执行审查”。",
         content_review_report={},
     )
+    try:
+        save_analysis_result(
+            sections=[section.model_dump() for section in sections],
+            analysis=result.model_dump(),
+            file_name="analyzed_content.md",
+            document_type="招标文件",
+            parse_method="structured_analysis",
+        )
+    except Exception:
+        pass
+    return result
 
 
 @app.get("/health")
@@ -247,6 +281,9 @@ def health() -> dict:
             "stream_fallback_non_stream": True,
             "runtime_env_write_disabled": True,
             "wide_retrieval_before_llm": True,
+            "sqlite_knowledge_demo": True,
+            "project_library": True,
+            "extraction_dedupe": True,
         },
         "backend_file": __file__,
         "backend_dir": str(Path(__file__).resolve().parent),
@@ -302,6 +339,152 @@ class ContentReviewRequest(BaseModel):
 class ContentReviewResponse(BaseModel):
     content_review_markdown: str = ""
     content_review_report: dict = Field(default_factory=dict)
+
+
+class KnowledgeEntryRequest(BaseModel):
+    id: Optional[str] = None
+    type: str = Field(default="company")
+    title: str
+    tags: str = ""
+    date: str = ""
+    files: str = ""
+    content: str = ""
+    notes: str = ""
+    createdAt: Optional[str] = None
+
+
+class KnowledgeEntryResponse(BaseModel):
+    entry: dict
+
+
+class KnowledgeListResponse(BaseModel):
+    entries: List[dict]
+
+
+class KnowledgeImportRequest(BaseModel):
+    store: dict = Field(default_factory=dict)
+
+
+class KnowledgeImportResponse(BaseModel):
+    imported_count: int
+
+
+class ConfirmRecordRequest(BaseModel):
+    status: str = Field(default="已确认")
+
+
+@app.get("/knowledge/types")
+def get_knowledge_types() -> dict:
+    return {
+        "types": [
+            {"id": key, "title": value}
+            for key, value in KNOWLEDGE_TYPES.items()
+        ]
+    }
+
+
+@app.get("/database/tables")
+def get_database_tables() -> dict:
+    try:
+        tables = list_database_tables()
+    except Exception as exc:
+        _raise_api_error(exc)
+    return {"database_path": str(DB_PATH), "tables": tables}
+
+
+@app.get("/projects")
+def get_projects(q: Optional[str] = None) -> dict:
+    try:
+        projects = list_projects(query=q)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return {"projects": projects}
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: str) -> dict:
+    try:
+        detail = get_project_detail(project_id)
+    except Exception as exc:
+        _raise_api_error(exc)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return detail
+
+
+@app.post("/projects/records/{table_name}/{record_id}/confirm")
+def confirm_project_record(table_name: str, record_id: str, request: ConfirmRecordRequest) -> dict:
+    try:
+        record = update_record_confirmed_status(table_name, record_id, request.status)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return {"record": record}
+
+
+@app.delete("/projects/{project_id}")
+def remove_project(project_id: str) -> dict:
+    try:
+        result = delete_project(project_id)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return result
+
+
+@app.delete("/projects/records/{table_name}/{record_id}")
+def remove_project_record(table_name: str, record_id: str) -> dict:
+    try:
+        result = delete_project_record(table_name, record_id)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return result
+
+
+@app.get("/knowledge/entries", response_model=KnowledgeListResponse)
+def get_knowledge_entries(
+    type: Optional[str] = None,
+    q: Optional[str] = None,
+) -> KnowledgeListResponse:
+    try:
+        entries = list_knowledge_entries(entry_type=type, query=q)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return KnowledgeListResponse(entries=entries)
+
+
+@app.post("/knowledge/entries", response_model=KnowledgeEntryResponse)
+def save_knowledge_entry(request: KnowledgeEntryRequest) -> KnowledgeEntryResponse:
+    try:
+        entry = upsert_knowledge_entry(request.model_dump())
+    except Exception as exc:
+        _raise_api_error(exc)
+    return KnowledgeEntryResponse(entry=entry)
+
+
+@app.delete("/knowledge/entries/{entry_id}")
+def remove_knowledge_entry(entry_id: str) -> dict:
+    try:
+        deleted = delete_knowledge_entry(entry_id)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return {"deleted": deleted}
+
+
+@app.get("/knowledge/export")
+def export_knowledge() -> dict:
+    try:
+        store = export_knowledge_store()
+    except Exception as exc:
+        _raise_api_error(exc)
+    return {"store": store, "db_path": str(DB_PATH)}
+
+
+@app.post("/knowledge/import", response_model=KnowledgeImportResponse)
+def import_knowledge(request: KnowledgeImportRequest) -> KnowledgeImportResponse:
+    try:
+        count = import_knowledge_store(request.store)
+    except Exception as exc:
+        _raise_api_error(exc)
+    return KnowledgeImportResponse(imported_count=count)
 
 
 @app.post("/bid-documents/parse", response_model=ParseDocumentResponse)
@@ -744,6 +927,16 @@ async def upload_and_analyze_document_stream(
                         content=results[field],
                     )
 
+            results = clean_analysis_dict(results)
+            for field, label, _ in jobs:
+                if results.get(field):
+                    yield _stream_event(
+                        "field_done",
+                        field=field,
+                        message=f"{label}清洗去重完成",
+                        content=results[field],
+                    )
+
             current_stage = "图片解析阶段"
             try:
                 image_items = await image_task
@@ -771,6 +964,17 @@ async def upload_and_analyze_document_stream(
             results["sections"] = [section.model_dump() for section in sections]
             results["content_review_report"] = {}
             results["content_review_markdown"] = "内容审查尚未执行，请在前端点击“执行审查”。"
+            try:
+                db_result = save_analysis_result(
+                    sections=results["sections"],
+                    analysis=results,
+                    file_name=filename,
+                    document_type="招标文件",
+                    parse_method=parse_method_used,
+                )
+                results["database_save"] = db_result
+            except Exception as db_exc:
+                results["database_save_error"] = str(db_exc)
             yield _stream_event(
                 "image_analysis",
                 message="图片解析和备注生成完成",
@@ -914,9 +1118,30 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
                         content=results[field],
                     )
 
+            results = clean_analysis_dict(results)
+            for field, label, _ in jobs:
+                if results.get(field):
+                    yield _stream_event(
+                        "field_done",
+                        field=field,
+                        message=f"{label}清洗去重完成",
+                        content=results[field],
+                    )
+
             results["sections"] = [section.model_dump() for section in sections]
             results["content_review_report"] = {}
             results["content_review_markdown"] = "内容审查尚未执行，请在前端点击“执行审查”。"
+            try:
+                db_result = save_analysis_result(
+                    sections=results["sections"],
+                    analysis=results,
+                    file_name="edited_content.md",
+                    document_type="招标文件",
+                    parse_method="edited_content",
+                )
+                results["database_save"] = db_result
+            except Exception as db_exc:
+                results["database_save_error"] = str(db_exc)
             yield _stream_event("done", message="修改内容分析完成", result=results)
         except Exception as exc:
             error_type, message, hint = _classify_exception(exc, stage=current_stage)

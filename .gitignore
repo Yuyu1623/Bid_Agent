@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+LOCAL_GITHUB_GUIDE.md
 
 .venv/
 .mineru-venv/
@@ -12,6 +13,8 @@ __pycache__/
 
 *.log
 logs/
+data/*.db
+data/*.db-*
 
 outputs/
 output/

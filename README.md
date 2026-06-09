@@ -15,12 +15,21 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
    -> 识别原生文本、扫描件、图文混排、表格、图片和页段结构
 
 2. 结构化抽取层 `[已完成基础版，持续增强中]`
-   -> 抽取资格条件：资格审查、符合性审查、废标项
-   -> 抽取评分点：商务评分、技术评分、评分标准、分值
-   -> 抽取技术参数：技术要求、服务要求、功能参数、验收标准
-   -> 抽取交付要求：商务内容、合同条款、付款方式、交付周期、售后维保
+   -> 先按宽关键词和章节标题召回候选片段，减少每个模块重复读取全文
+   -> 五路并发调用大模型，分别抽取投标人须知、商务内容、技术要求、资格审查、评分要求
+   -> 投标人须知清洗为 project_profile，并同步项目名称、编号、预算、招标人、代理机构等项目主字段
+   -> 商务内容清洗为 business_requirements，按表格行或 Markdown 小点拆成独立条款，覆盖报价、合同、付款、交付、验收、保证金、售后等条款
+   -> 技术要求清洗为 technical_requirements，按标题层级和列表小点拆成独立要求，覆盖技术参数、服务要求、实施要求、验收标准
+   -> 资格审查清洗为 qualification_requirements，区分资格性审查和符合性审查
+   -> 废标项清洗为 rejection_items，保留废标项、具体表现、风险等级和原文证据
+   -> 评分要求清洗为 scoring_items，区分商务评分、技术评分、评分标准和分值
+   -> 内容审查结果清洗为 review_findings，保留风险、缺失项、建议和待处理状态
+   -> 解析后的章节写入 document_sections，语义切片写入 document_chunks
+   -> document_chunks 不按整章粗切，而是优先按 Markdown 表格行、列表小点、业务条款和段落块切成 RAG 最小语义单元
+   -> 当前已完成 SQLite 基础入库；向量索引通过 chunk_embeddings 预留映射，后续接 Chroma / FAISS / Qdrant
 
-3. 知识沉淀层 `[规划中]`
+3. 知识沉淀层 `[SQLite 基础版完成，向量检索规划中]`
+   -> 建立企业内部数据库，包括公司信息、资质管理、人员信息、财务信息、业绩信息、历史投标文件
    -> 建立项目表，沉淀项目名称、编号、预算、招标人、代理机构、时间节点
    -> 建立规则库，沉淀资格规则、评分规则、废标规则、响应规则
    -> 建立案例库，沉淀历史项目、相似项目、投标经验和常见风险
@@ -47,6 +56,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 当前完成度说明：
 
 - `已完成基础版`：已有可用功能链路，后续主要做稳定性、速度和准确率增强。
+- `前端基础版完成`：前端已有可用录入、查看、编辑和本地保存能力，后续接后端数据库、附件管理和检索增强。
 - `部分完成`：已有入口或核心能力，但还没有覆盖完整业务闭环。
 - `规划中`：README 中明确为后续建设方向，当前尚未形成完整功能。
 
@@ -100,7 +110,13 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 - 支持大模型流式输出和非流式输出
 - 支持五个大模型分析任务并发执行
 - 支持五个模块先按宽关键词/章节标题召回候选片段，再交给大模型提取，减少全文重复输入
+- 支持大模型提取结果后处理去重，会按表格行、句子、小点和《材料名称》识别重复内容，减少复读和冗余入库
 - 支持修改解析后的内容并重新分析
+- 知识库前端基础版已完成，支持公司信息、资质管理、人员信息、财务信息、业绩信息、历史案例库、历史投标文件和方案素材库八类知识资产录入
+- 知识库支持本地保存、搜索、新建、编辑、删除、JSON 导入和 JSON 导出
+- 项目库基础版已完成，支持查看 SQLite 中的项目列表、来源文件、章节、切片、项目概览、商务要求、技术要求、资格审查、废标项、评分项和审查发现
+- 项目库支持对结构化记录进行人工确认，状态可切换为未确认、已确认或需复核
+- 项目库支持删除整个项目，或删除单条结构化记录，便于清理测试数据和错误抽取项
 - Electron 客户端支持自动启动 FastAPI 后端，并通过 `/health` 做端口连通性检查
 - 后端连接失败时，前端会显示端口、后端目录、健康检查结果和最近启动日志，便于定位依赖、端口占用或 Python 启动问题
 - 前端按五大模块展示：投标人须知、商务内容、技术要求、资格审查、评分要求
@@ -109,6 +125,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 - 商务内容、技术要求、内容审查统一使用 Markdown 展示区，Markdown 表格会直接渲染为可读表格
 - 图片解析支持图片卡片展示，保留图片预览、OCR 文本和 AI 备注
 - 各模块支持展开查看，展开后仍保留 Markdown 表格和图片卡片，不会退化为纯文本
+- 投标人须知字段可直接编辑；商务内容、技术要求、资格审查、评分要求和内容审查支持编辑原始 Markdown，保存后自动重新渲染表格
 - 解析完成后可手动执行内容审查，使用正则匹配、关键词回查、原文证据片段和提取结果溯源比对各模块提取内容的完整性与准确性；也可选择支持深度思考的模型追加复核意见
 - 评分要求会先按“评分、评审、分值、商务评审、技术评审”等关键词筛选上下文，提高长文档提取稳定性
 
@@ -123,6 +140,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ├── bid_parse_strategy.py      # 解析方式推荐和解析质量报告
 ├── bid_section_retriever.py   # 五大模块宽关键词召回，减少大模型全文重复读取
 ├── bid_image_analysis.py      # 文档图片分析和 OCR 辅助能力
+├── bid_database.py            # SQLite 数据库初始化、知识库 CRUD 和结构化入库
 ├── MinerU_pdf_parse_tool.py   # MinerU API 文档解析工具
 ├── llm_client.py              # OpenAI-compatible 大模型客户端，支持同步、异步、流式
 ├── llm_model_config.py        # 前端模型名称与真实模型 ID 映射
@@ -131,6 +149,11 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ├── run_plan_and_solve.py      # 命令行入口
 ├── requirements.txt           # Python 依赖
 ├── MINERU_LOCAL_DEPLOY.md     # MinerU 本地部署说明
+├── DATABASE_SCHEMA_DESIGN.md  # 招投标智能体数据库表设计
+├── docs/
+│   └── 招投标智能体数据库表结构.xlsx  # 当前 SQLite 表结构 Excel
+├── scripts/
+│   └── export_db_schema_excel.py      # 表结构 Excel 导出脚本
 └── electron_client/           # Electron 桌面客户端
     ├── main.js
     ├── preload.js
@@ -449,12 +472,112 @@ BID_RETRIEVAL_MAX_CHARS=52000
 - 评分要求：按商务评分、技术评分切换，表格化展示。
 - 图片解析：以图片卡片展示，保留图片预览、OCR 文本和 AI 备注。
 - 内容审查：Markdown 展示区，正则审查和大模型深度复核结果直接渲染为表格和分节报告。
+- 编辑能力：投标人须知可在字段中直接修改；商务、技术、资格、评分、内容审查可通过“编辑”按钮修改原始 Markdown，保存后自动刷新页面展示。
 
 各模块的“展开”按钮使用富文本预览：
 
 - Markdown 表格在展开窗口中仍显示为表格。
 - 图片解析在展开窗口中仍显示图片卡片。
 - 复制和导出仍使用原始 Markdown / 文本内容，便于留档和二次编辑。
+
+## 知识库
+
+知识库当前已完成 SQLite 后端存储 Demo：前端知识库表单会优先通过 FastAPI 写入本地 SQLite 数据库；如果后端不可用，则自动退回前端 `localStorage` 兜底。
+
+SQLite 数据库默认位置：
+
+```text
+data/dowell_bid_agent.db
+```
+
+该文件属于本地业务数据，已加入 `.gitignore`，不要上传到 GitHub。
+
+当前支持八类知识资产：
+
+- 公司信息：公司简介、联系方式、经营范围、服务能力、服务承诺。
+- 资质管理：营业执照、资质证书、体系认证、授权文件和有效期。
+- 人员信息：项目经理、技术负责人、团队成员、证书、履历和项目经验。
+- 财务信息：审计报告、财务指标、纳税社保、银行资信和财务承诺。
+- 业绩信息：历史项目业绩、合同金额、客户类型、验收情况和证明材料。
+- 历史案例库：相似项目案例、投标复盘、得失分经验和风险处理记录。
+- 历史投标文件：历史商务标、技术标、响应表、偏离表和终稿文件索引。
+- 方案素材库：服务方案、技术方案、实施计划、售后运维、质量保障等可复用素材。
+
+当前支持的操作：
+
+- 按知识类型切换
+- 新建、编辑、删除知识条目
+- 按标题、标签、备注和正文搜索
+- 本地自动保存
+- JSON 导入和导出
+
+当前后端 Demo 接口：
+
+```text
+GET    /knowledge/types
+GET    /knowledge/entries
+POST   /knowledge/entries
+DELETE /knowledge/entries/{entry_id}
+GET    /knowledge/export
+POST   /knowledge/import
+```
+
+## 结构化抽取与入库
+
+解析文件并完成五大模块结构化抽取后，后端会尝试把结果写入 SQLite：
+
+```text
+五大模块结果
+  -> 项目概览清洗
+  -> Markdown 表格解析
+  -> 章节与切片入库
+  -> 写入 projects / source_documents / document_sections / document_chunks
+  -> 写入 project_profile
+  -> 写入 business_requirements
+  -> 写入 technical_requirements
+  -> 写入 qualification_requirements
+  -> 写入 rejection_items
+  -> 写入 scoring_items
+  -> 写入 review_findings
+  -> 记录 extraction_runs
+```
+
+当前结构化抽取和入库的表职责如下：
+
+| 表名 | 当前写入内容 | 用途 |
+| --- | --- | --- |
+| `projects` | 项目名称、编号、类别、招标人、代理机构、预算、状态 | 项目主索引 |
+| `source_documents` | 文件名称、类型、扩展名、解析方式、解析状态 | 原始文件索引 |
+| `document_sections` | 章节标题、顺序、Markdown、纯文本、章节类型 | 保留解析后的章节结构 |
+| `document_chunks` | 表格行、列表小点、业务条款、段落块、模块标签、标题路径、元数据 | 后续 RAG 检索和引用 |
+| `project_profile` | 投标人须知 / 项目概览字段 | 项目基础事实表 |
+| `business_requirements` | 商务条款、所属标题、序号、金额、比例、期限、强制性、元数据 | 商务响应和合同条款复用 |
+| `technical_requirements` | 技术小点、所属标题、父级事项、序号、验收标准、重要程度、元数据 | 技术标响应和方案生成 |
+| `qualification_requirements` | 资格性审查、符合性审查、需提供资料 | 资格材料核对 |
+| `rejection_items` | 废标项、具体表现、风险等级 | 废标风险检查 |
+| `scoring_items` | 商务评分、技术评分、评分标准、分值 | 标书生成时对齐评分点 |
+| `review_findings` | 内容审查发现、风险等级、建议、状态 | 人工复核和风险闭环 |
+| `extraction_runs` | 抽取任务、状态、输入切片、开始结束时间 | 追踪每次解析和抽取过程 |
+
+当前是基础版清洗：已经能把解析结果按表落库并跑通主链路；商务内容和技术要求会按 Markdown 标题、编号和列表小点拆成多条记录，资格审查、废标项、评分项也会保留所属标题、序号和元数据。入库前会对重复句、重复表格行和重复《材料名称》做规范化去重，减少大模型复读造成的冗余记录。`document_chunks` 会优先按表格行、列表小点和段落块生成最小语义单元，并保留 `title_path`、`chunk_type`、`content_markdown`、`page_start`、`page_end`、`metadata_json` 等字段。复杂页码溯源、精细金额/日期标准化、表格跨页合并、向量索引写入后续继续增强。
+
+向量检索的规划是：SQLite 继续保存结构化事实和业务状态，向量数据库保存可语义检索的长文本、条款、评分点、历史案例和方案素材。`chunk_embeddings` 用于记录 SQLite 记录和外部向量库之间的映射关系。
+
+可以通过以下接口查看 SQLite 中所有表和数据量：
+
+```text
+GET /database/tables
+```
+
+项目库查询与确认接口：
+
+```text
+GET  /projects
+GET  /projects/{project_id}
+POST /projects/records/{table_name}/{record_id}/confirm
+DELETE /projects/{project_id}
+DELETE /projects/records/{table_name}/{record_id}
+```
 
 ## 性能说明
 
@@ -511,64 +634,6 @@ electron_client/dist/
 `electron_client/dist/` 已加入 `.gitignore`，不要提交打包产物。
 
 打包后的 exe 会包含当时的 Electron 前端文件和后端 Python 文件。如果修改了 `electron_client/main.js`、`preload.js`、`renderer.js`、`styles.css` 或后端 `.py` 文件，需要重新执行 `npm run dist` 生成新版 exe。
-
-## 不要提交的内容
-
-以下内容不应上传到 GitHub：
-
-```text
-.env
-.venv/
-.mineru-venv/
-electron_client/node_modules/
-electron_client/dist/
-__pycache__/
-*.pyc
-logs/
-outputs/
-uploads/
-temp/
-tmp/
-```
-
-## 更新到 GitHub
-
-提交前先检查敏感文件是否被跟踪：
-
-```bash
-git status --short
-git ls-files .env
-git ls-files .venv .mineru-venv electron_client/node_modules electron_client/dist __pycache__
-```
-
-如果 `git ls-files .env` 有输出，先从 Git 索引移除，但保留本地文件：
-
-```bash
-git rm --cached .env
-```
-
-如果虚拟环境、依赖目录、构建产物或缓存目录被跟踪，执行：
-
-```bash
-git rm -r --cached .venv
-git rm -r --cached .mineru-venv
-git rm -r --cached electron_client/node_modules
-git rm -r --cached electron_client/dist
-git rm -r --cached __pycache__
-```
-
-如果某条命令提示路径不存在或没有被跟踪，可以忽略。
-
-确认没有敏感文件后提交：
-
-```bash
-git add .
-git status --short
-git commit -m "Update project documentation and technical path"
-git push origin master
-```
-
-如果之前已经把 `.env` 或密钥推送到 GitHub，建议立即更换相关 API Key 和 Token。
 
 ## 后续计划
 

@@ -1,0 +1,1651 @@
+# -*- coding: utf-8 -*-
+"""SQLite persistence demo for the bid agent."""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from extraction_cleaner import clean_analysis_dict, is_duplicate_text
+
+DB_PATH = Path(__file__).resolve().parent / "data" / "dowell_bid_agent.db"
+
+
+KNOWLEDGE_TYPES = {
+    "company": "公司信息",
+    "qualification": "资质管理",
+    "personnel": "人员信息",
+    "finance": "财务信息",
+    "performance": "业绩信息",
+    "cases": "历史案例库",
+    "bidFiles": "历史投标文件",
+    "materials": "方案素材库",
+}
+
+
+def init_database(db_path: Path = DB_PATH) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with _connect(db_path) as conn:
+        conn.executescript(
+            """
+            create table if not exists projects (
+                id text primary key,
+                project_name text,
+                project_code text,
+                project_category text,
+                buyer_name text,
+                agency_name text,
+                budget_amount real,
+                status text default '待核对',
+                created_at text not null,
+                updated_at text not null
+            );
+
+            create table if not exists source_documents (
+                id text primary key,
+                project_id text,
+                document_type text not null,
+                file_name text not null,
+                file_ext text,
+                file_path text,
+                parse_method text,
+                parse_status text default '待解析',
+                page_count integer,
+                created_at text not null
+            );
+
+            create table if not exists document_sections (
+                id text primary key,
+                document_id text not null,
+                project_id text not null,
+                section_index integer not null,
+                parent_section_id text,
+                title text,
+                level integer,
+                page_start integer,
+                page_end integer,
+                markdown text not null,
+                plain_text text,
+                section_type text,
+                created_at text not null
+            );
+
+            create table if not exists document_chunks (
+                id text primary key,
+                project_id text,
+                document_id text,
+                section_id text,
+                chunk_index integer not null default 0,
+                chunk_type text not null,
+                module text,
+                title_path text,
+                content text not null,
+                content_markdown text,
+                page_start integer,
+                page_end integer,
+                source_text text,
+                tags_json text default '[]',
+                metadata_json text default '{}',
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists knowledge_entries (
+                id text primary key,
+                type text not null,
+                title text not null,
+                tags text default '',
+                date_text text default '',
+                files text default '',
+                content text default '',
+                notes text default '',
+                created_at text not null,
+                updated_at text not null
+            );
+
+            create index if not exists idx_knowledge_type on knowledge_entries(type);
+            create index if not exists idx_sections_project on document_sections(project_id);
+            create index if not exists idx_sections_document on document_sections(document_id);
+            create index if not exists idx_chunks_project on document_chunks(project_id);
+
+            create table if not exists extraction_runs (
+                id text primary key,
+                project_id text not null,
+                document_id text,
+                run_type text not null,
+                llm_vendor text,
+                llm_model text,
+                prompt_version text,
+                input_chunk_ids_json text default '[]',
+                status text not null,
+                error_message text,
+                started_at text not null,
+                finished_at text
+            );
+
+            create table if not exists project_profile (
+                id text primary key,
+                project_id text not null,
+                project_name text,
+                project_code text,
+                project_category text,
+                service_period text,
+                package_no text,
+                budget_text text,
+                budget_amount real,
+                buyer_name text,
+                agency_name text,
+                industry_domain text,
+                timeline_summary text,
+                implementation_scope text,
+                technical_features text,
+                other_key_requirements text,
+                is_sme_reserved integer,
+                is_blind_bid integer,
+                source_text text,
+                confidence real,
+                confirmed_status text default '未确认',
+                created_at text not null,
+                updated_at text not null
+            );
+
+            create table if not exists qualification_requirements (
+                id text primary key,
+                project_id text not null,
+                review_type text not null,
+                sequence_no text,
+                requirement_text text not null,
+                required_materials text,
+                is_mandatory integer default 1,
+                risk_level text,
+                source_page_start integer,
+                source_page_end integer,
+                source_heading text,
+                item_sequence text,
+                source_text text,
+                metadata_json text default '{}',
+                chunk_id text,
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists rejection_items (
+                id text primary key,
+                project_id text not null,
+                sequence_no text,
+                rejection_item text not null,
+                specific_behavior text,
+                risk_level text default '高',
+                related_module text,
+                check_method text,
+                source_heading text,
+                item_sequence text,
+                source_text text,
+                metadata_json text default '{}',
+                chunk_id text,
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists business_requirements (
+                id text primary key,
+                project_id text not null,
+                requirement_type text not null,
+                item_name text,
+                requirement_text text not null,
+                amount real,
+                ratio real,
+                deadline_text text,
+                is_mandatory integer,
+                source_heading text,
+                item_sequence text,
+                source_text text,
+                metadata_json text default '{}',
+                chunk_id text,
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists technical_requirements (
+                id text primary key,
+                project_id text not null,
+                requirement_group text,
+                item_name text,
+                parameter_name text,
+                parameter_value text,
+                requirement_text text not null,
+                acceptance_criteria text,
+                is_mandatory integer,
+                importance_level text,
+                source_heading text,
+                item_sequence text,
+                source_text text,
+                metadata_json text default '{}',
+                chunk_id text,
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists scoring_items (
+                id text primary key,
+                project_id text not null,
+                score_type text not null,
+                parent_item_id text,
+                item_name text not null,
+                scoring_standard text not null,
+                score_value real,
+                score_text text,
+                evidence_required text,
+                self_assessment text,
+                source_heading text,
+                item_sequence text,
+                source_text text,
+                metadata_json text default '{}',
+                chunk_id text,
+                confirmed_status text default '未确认',
+                created_at text not null
+            );
+
+            create table if not exists review_findings (
+                id text primary key,
+                project_id text not null,
+                review_type text not null,
+                module text not null,
+                risk_level text not null,
+                finding_title text not null,
+                finding_detail text not null,
+                source_text text,
+                suggestion text,
+                status text default '待处理',
+                created_by text default '系统',
+                created_at text not null
+            );
+
+            create table if not exists chunk_embeddings (
+                id text primary key,
+                chunk_id text not null,
+                embedding_model text not null,
+                embedding_dim integer not null,
+                vector_store text not null,
+                vector_id text not null,
+                indexed_at text not null
+            );
+
+            create table if not exists companies (
+                id text primary key,
+                company_name text not null,
+                short_name text,
+                credit_code text,
+                legal_representative text,
+                registered_capital text,
+                business_scope text,
+                address text,
+                contact_person text,
+                contact_phone text,
+                company_profile text,
+                status text default '有效',
+                created_at text not null,
+                updated_at text not null
+            );
+
+            create table if not exists company_qualifications (
+                id text primary key,
+                company_id text,
+                qualification_type text not null,
+                qualification_name text not null,
+                certificate_no text,
+                issuer text,
+                issue_date text,
+                expire_date text,
+                valid_status text default '待核对',
+                file_path text,
+                applicable_scope text,
+                notes text,
+                created_at text not null
+            );
+
+            create table if not exists company_personnel (
+                id text primary key,
+                company_id text,
+                name text not null,
+                role text,
+                title text,
+                certificates_json text default '[]',
+                education text,
+                years_experience real,
+                project_experience text,
+                file_path text,
+                availability_status text default '可用',
+                created_at text not null
+            );
+
+            create table if not exists financial_records (
+                id text primary key,
+                company_id text,
+                record_type text not null,
+                fiscal_year integer,
+                revenue real,
+                net_profit real,
+                total_assets real,
+                tax_status text,
+                social_security_status text,
+                file_path text,
+                notes text,
+                created_at text not null
+            );
+
+            create table if not exists performance_records (
+                id text primary key,
+                company_id text,
+                project_name text not null,
+                client_name text,
+                industry_domain text,
+                contract_amount real,
+                contract_date text,
+                acceptance_date text,
+                project_scope text,
+                proof_files_json text default '[]',
+                reusable_points text,
+                tags_json text default '[]',
+                created_at text not null
+            );
+
+            create table if not exists historical_cases (
+                id text primary key,
+                case_title text not null,
+                related_project_id text,
+                industry_domain text,
+                case_type text not null,
+                summary text not null,
+                success_factors text,
+                failure_reasons text,
+                risk_points text,
+                reuse_suggestion text,
+                tags_json text default '[]',
+                created_at text not null
+            );
+
+            create table if not exists historical_bid_files (
+                id text primary key,
+                related_project_id text,
+                file_type text not null,
+                file_name text not null,
+                file_path text,
+                version text,
+                project_name text,
+                bid_result text,
+                reusable_sections text,
+                tags_json text default '[]',
+                created_at text not null
+            );
+
+            create table if not exists solution_materials (
+                id text primary key,
+                material_type text not null,
+                title text not null,
+                content text not null,
+                applicable_domain text,
+                applicable_project_type text,
+                quality_level text,
+                source_case_id text,
+                source_bid_file_id text,
+                tags_json text default '[]',
+                confirmed_status text default '未确认',
+                created_at text not null,
+                updated_at text not null
+            );
+
+            create table if not exists bid_generation_tasks (
+                id text primary key,
+                project_id text,
+                task_type text not null,
+                input_requirements_json text default '{}',
+                retrieved_knowledge_ids_json text default '[]',
+                output_markdown text,
+                status text default '生成中',
+                created_at text not null,
+                updated_at text not null
+            );
+            """
+        )
+        _ensure_columns(
+            conn,
+            "business_requirements",
+            {
+                "source_heading": "text",
+                "item_sequence": "text",
+                "metadata_json": "text default '{}'",
+            },
+        )
+        _ensure_columns(
+            conn,
+            "document_chunks",
+            {
+                "content_markdown": "text",
+                "page_start": "integer",
+                "page_end": "integer",
+            },
+        )
+        for table_name in ("qualification_requirements", "rejection_items", "scoring_items"):
+            _ensure_columns(
+                conn,
+                table_name,
+                {
+                    "source_heading": "text",
+                    "item_sequence": "text",
+                    "metadata_json": "text default '{}'",
+                },
+            )
+        _ensure_columns(
+            conn,
+            "technical_requirements",
+            {
+                "source_heading": "text",
+                "item_sequence": "text",
+                "metadata_json": "text default '{}'",
+            },
+        )
+
+
+def list_knowledge_entries(
+    entry_type: str | None = None,
+    query: str | None = None,
+    db_path: Path = DB_PATH,
+) -> list[dict[str, Any]]:
+    init_database(db_path)
+    sql = "select * from knowledge_entries"
+    params: list[Any] = []
+    where = []
+    if entry_type:
+        where.append("type = ?")
+        params.append(entry_type)
+    if query:
+        like = f"%{query}%"
+        where.append(
+            "(title like ? or tags like ? or date_text like ? or files like ? or content like ? or notes like ?)"
+        )
+        params.extend([like, like, like, like, like, like])
+    if where:
+        sql += " where " + " and ".join(where)
+    sql += " order by updated_at desc"
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_knowledge_row_to_dict(row) for row in rows]
+
+
+def get_knowledge_entry(entry_id: str, db_path: Path = DB_PATH) -> dict[str, Any] | None:
+    init_database(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute("select * from knowledge_entries where id = ?", (entry_id,)).fetchone()
+    return _knowledge_row_to_dict(row) if row else None
+
+
+def upsert_knowledge_entry(data: dict[str, Any], db_path: Path = DB_PATH) -> dict[str, Any]:
+    init_database(db_path)
+    now = _now()
+    entry_id = str(data.get("id") or f"kb_{uuid4().hex}")
+    entry_type = str(data.get("type") or "company")
+    if entry_type not in KNOWLEDGE_TYPES:
+        raise ValueError(f"Unsupported knowledge type: {entry_type}")
+    title = str(data.get("title") or "").strip()
+    if not title:
+        raise ValueError("Knowledge title is required.")
+
+    existing = get_knowledge_entry(entry_id, db_path)
+    created_at = existing["createdAt"] if existing else str(data.get("createdAt") or now)
+    payload = {
+        "id": entry_id,
+        "type": entry_type,
+        "title": title,
+        "tags": str(data.get("tags") or "").strip(),
+        "date_text": str(data.get("date") or data.get("dateText") or "").strip(),
+        "files": str(data.get("files") or "").strip(),
+        "content": str(data.get("content") or "").strip(),
+        "notes": str(data.get("notes") or "").strip(),
+        "created_at": created_at,
+        "updated_at": now,
+    }
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into knowledge_entries
+                (id, type, title, tags, date_text, files, content, notes, created_at, updated_at)
+            values
+                (:id, :type, :title, :tags, :date_text, :files, :content, :notes, :created_at, :updated_at)
+            on conflict(id) do update set
+                type = excluded.type,
+                title = excluded.title,
+                tags = excluded.tags,
+                date_text = excluded.date_text,
+                files = excluded.files,
+                content = excluded.content,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            """,
+            payload,
+        )
+    entry = get_knowledge_entry(entry_id, db_path)
+    if not entry:
+        raise RuntimeError("Knowledge entry save failed.")
+    return entry
+
+
+def delete_knowledge_entry(entry_id: str, db_path: Path = DB_PATH) -> bool:
+    init_database(db_path)
+    with _connect(db_path) as conn:
+        cursor = conn.execute("delete from knowledge_entries where id = ?", (entry_id,))
+    return cursor.rowcount > 0
+
+
+def export_knowledge_store(db_path: Path = DB_PATH) -> dict[str, list[dict[str, Any]]]:
+    entries = list_knowledge_entries(db_path=db_path)
+    store: dict[str, list[dict[str, Any]]] = {key: [] for key in KNOWLEDGE_TYPES}
+    for entry in entries:
+        store.setdefault(entry["type"], []).append(entry)
+    return store
+
+
+def import_knowledge_store(store: dict[str, Any], db_path: Path = DB_PATH) -> int:
+    init_database(db_path)
+    count = 0
+    for entry_type, entries in (store or {}).items():
+        if entry_type not in KNOWLEDGE_TYPES or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry = {**entry, "type": entry.get("type") or entry_type}
+            upsert_knowledge_entry(entry, db_path)
+            count += 1
+    return count
+
+
+PROJECT_DETAIL_TABLES = {
+    "project_profile": "项目概览",
+    "business_requirements": "商务要求",
+    "technical_requirements": "技术要求",
+    "qualification_requirements": "资格审查",
+    "rejection_items": "废标项",
+    "scoring_items": "评分项",
+    "review_findings": "审查发现",
+    "source_documents": "来源文件",
+    "document_sections": "文档章节",
+    "document_chunks": "语义切片",
+    "extraction_runs": "抽取任务",
+}
+
+
+CONFIRMABLE_TABLES = {
+    "project_profile",
+    "business_requirements",
+    "technical_requirements",
+    "qualification_requirements",
+    "rejection_items",
+    "scoring_items",
+    "document_chunks",
+    "solution_materials",
+}
+
+PROJECT_SCOPED_TABLES = {
+    "source_documents",
+    "document_sections",
+    "document_chunks",
+    "extraction_runs",
+    "project_profile",
+    "qualification_requirements",
+    "rejection_items",
+    "business_requirements",
+    "technical_requirements",
+    "scoring_items",
+    "review_findings",
+}
+
+DELETABLE_PROJECT_RECORD_TABLES = PROJECT_SCOPED_TABLES - {"extraction_runs", "source_documents"}
+
+
+def list_projects(
+    query: str | None = None,
+    db_path: Path = DB_PATH,
+) -> list[dict[str, Any]]:
+    init_database(db_path)
+    sql = """
+        select
+            p.*,
+            count(distinct d.id) as document_count,
+            count(distinct c.id) as chunk_count
+        from projects p
+        left join source_documents d on d.project_id = p.id
+        left join document_chunks c on c.project_id = p.id
+    """
+    params: list[Any] = []
+    if query:
+        like = f"%{query}%"
+        sql += """
+            where p.project_name like ?
+               or p.project_code like ?
+               or p.buyer_name like ?
+               or p.agency_name like ?
+        """
+        params.extend([like, like, like, like])
+    sql += " group by p.id order by p.updated_at desc, p.created_at desc"
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_project_row_to_dict(row) for row in rows]
+
+
+def get_project_detail(project_id: str, db_path: Path = DB_PATH) -> dict[str, Any] | None:
+    init_database(db_path)
+    with _connect(db_path) as conn:
+        project = conn.execute("select * from projects where id = ?", (project_id,)).fetchone()
+        if not project:
+            return None
+        tables: dict[str, Any] = {}
+        for table_name, title in PROJECT_DETAIL_TABLES.items():
+            order_by = _project_table_order_by(table_name)
+            rows = conn.execute(
+                f"select * from {quote_identifier(table_name)} where project_id = ? {order_by}",
+                (project_id,),
+            ).fetchall()
+            tables[table_name] = {
+                "title": title,
+                "rows": [_row_to_dict(row) for row in rows],
+            }
+    return {
+        "project": _row_to_dict(project),
+        "tables": tables,
+    }
+
+
+def update_record_confirmed_status(
+    table_name: str,
+    record_id: str,
+    status: str,
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    init_database(db_path)
+    if table_name not in CONFIRMABLE_TABLES:
+        raise ValueError(f"Table is not confirmable: {table_name}")
+    normalized_status = status if status in {"未确认", "已确认", "需复核"} else "未确认"
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"select * from {quote_identifier(table_name)} where id = ?",
+            (record_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Record not found: {record_id}")
+        conn.execute(
+            f"update {quote_identifier(table_name)} set confirmed_status = ? where id = ?",
+            (normalized_status, record_id),
+        )
+        updated = conn.execute(
+            f"select * from {quote_identifier(table_name)} where id = ?",
+            (record_id,),
+        ).fetchone()
+    return _row_to_dict(updated)
+
+
+def delete_project(project_id: str, db_path: Path = DB_PATH) -> dict[str, Any]:
+    init_database(db_path)
+    deleted: dict[str, int] = {}
+    with _connect(db_path) as conn:
+        project = conn.execute("select id from projects where id = ?", (project_id,)).fetchone()
+        if not project:
+            return {"deleted": False, "tables": deleted}
+        for table_name in PROJECT_SCOPED_TABLES:
+            cursor = conn.execute(
+                f"delete from {quote_identifier(table_name)} where project_id = ?",
+                (project_id,),
+            )
+            deleted[table_name] = cursor.rowcount
+        cursor = conn.execute("delete from projects where id = ?", (project_id,))
+        deleted["projects"] = cursor.rowcount
+    return {"deleted": True, "tables": deleted}
+
+
+def delete_project_record(
+    table_name: str,
+    record_id: str,
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    init_database(db_path)
+    if table_name not in DELETABLE_PROJECT_RECORD_TABLES:
+        raise ValueError(f"Table is not deletable: {table_name}")
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            f"select * from {quote_identifier(table_name)} where id = ?",
+            (record_id,),
+        ).fetchone()
+        if not row:
+            return {"deleted": False, "record": None}
+        cursor = conn.execute(
+            f"delete from {quote_identifier(table_name)} where id = ?",
+            (record_id,),
+        )
+    return {"deleted": cursor.rowcount > 0, "record": _row_to_dict(row)}
+
+
+def save_analysis_result(
+    sections: list[Any],
+    analysis: dict[str, Any],
+    *,
+    file_name: str = "uploaded_document",
+    document_type: str = "招标文件",
+    parse_method: str = "",
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    """Persist parsed sections and five extracted modules into SQLite demo tables."""
+    init_database(db_path)
+    analysis = clean_analysis_dict(analysis)
+    now = _now()
+    project_id = f"prj_{uuid4().hex}"
+    document_id = f"doc_{uuid4().hex}"
+    profile_values = _parse_project_profile(analysis.get("project_overview", ""))
+    project_name = profile_values.get("项目名称") or "未命名项目"
+    project_code = profile_values.get("项目编号") or ""
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into projects
+                (id, project_name, project_code, project_category, buyer_name, agency_name, budget_amount, status, created_at, updated_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                project_name,
+                project_code,
+                profile_values.get("项目类别（服务类，货物类，工程类）和服务年限", ""),
+                profile_values.get("招标人", ""),
+                profile_values.get("招标代理机构", ""),
+                _extract_amount(profile_values.get("项目规模和预算", "")),
+                "待核对",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            insert into source_documents
+                (id, project_id, document_type, file_name, file_ext, file_path, parse_method, parse_status, page_count, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                project_id,
+                document_type,
+                file_name,
+                Path(file_name).suffix.lstrip(".").lower(),
+                file_name,
+                parse_method,
+                "解析成功",
+                None,
+                now,
+            ),
+        )
+
+        chunk_ids = _insert_sections_as_chunks(conn, project_id, document_id, sections, now)
+        _insert_project_profile(conn, project_id, analysis.get("project_overview", ""), profile_values, now)
+        _insert_business_requirements(conn, project_id, analysis.get("business_content", ""), now)
+        _insert_technical_requirements(conn, project_id, analysis.get("technical_scoring_requirements", ""), now)
+        _insert_qualification_and_rejection(conn, project_id, analysis.get("qualification_compliance_requirements", ""), now)
+        _insert_scoring_items(conn, project_id, analysis.get("price_scoring_requirements", ""), now)
+        _insert_review_findings(conn, project_id, analysis.get("content_review_markdown", ""), now)
+
+        conn.execute(
+            """
+            insert into extraction_runs
+                (id, project_id, document_id, run_type, status, started_at, finished_at, input_chunk_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"run_{uuid4().hex}",
+                project_id,
+                document_id,
+                "五大模块结构化入库",
+                "成功",
+                now,
+                now,
+                dumps_json(chunk_ids),
+            ),
+        )
+
+    return {
+        "project_id": project_id,
+        "document_id": document_id,
+        "chunk_count": len(chunk_ids),
+        "project_name": project_name,
+        "database_path": str(db_path),
+    }
+
+
+def list_database_tables(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    init_database(db_path)
+    with _connect(db_path) as conn:
+        table_rows = conn.execute(
+            "select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name"
+        ).fetchall()
+        output = []
+        for row in table_rows:
+            name = row["name"]
+            count = conn.execute(f"select count(*) as count from {name}").fetchone()["count"]
+            output.append({"name": name, "count": count})
+    return output
+
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
+    existing = {
+        row["name"]
+        for row in conn.execute(f"pragma table_info({quote_identifier(table_name)})").fetchall()
+    }
+    for column_name, column_type in columns.items():
+        if column_name not in existing:
+            conn.execute(
+                f"alter table {quote_identifier(table_name)} add column {quote_identifier(column_name)} {column_type}"
+            )
+
+
+def _knowledge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "title": row["title"],
+        "tags": row["tags"],
+        "date": row["date_text"],
+        "files": row["files"],
+        "content": row["content"],
+        "notes": row["notes"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    return dict(row) if row else {}
+
+
+def _project_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    return {
+        "id": data.get("id"),
+        "projectName": data.get("project_name") or "未命名项目",
+        "projectCode": data.get("project_code") or "",
+        "projectCategory": data.get("project_category") or "",
+        "buyerName": data.get("buyer_name") or "",
+        "agencyName": data.get("agency_name") or "",
+        "budgetAmount": data.get("budget_amount"),
+        "status": data.get("status") or "待核对",
+        "documentCount": data.get("document_count") or 0,
+        "chunkCount": data.get("chunk_count") or 0,
+        "createdAt": data.get("created_at") or "",
+        "updatedAt": data.get("updated_at") or "",
+    }
+
+
+def _project_table_order_by(table_name: str) -> str:
+    if table_name == "document_sections":
+        return "order by section_index asc"
+    if table_name == "document_chunks":
+        return "order by chunk_index asc"
+    if table_name in {"qualification_requirements", "rejection_items"}:
+        return "order by sequence_no asc, created_at asc"
+    if table_name == "scoring_items":
+        return "order by score_type asc, created_at asc"
+    if table_name == "source_documents":
+        return "order by created_at desc"
+    if table_name == "extraction_runs":
+        return "order by started_at desc"
+    return "order by created_at desc"
+
+
+def _now() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
+def dumps_json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _insert_sections_as_chunks(
+    conn: sqlite3.Connection,
+    project_id: str,
+    document_id: str,
+    sections: list[Any],
+    now: str,
+) -> list[str]:
+    chunk_ids = []
+    chunk_index = 0
+    for index, section in enumerate(sections or [], start=1):
+        markdown = _section_value(section, "markdown") or _section_value(section, "content")
+        title = _section_value(section, "title") or f"章节{index}"
+        if not str(markdown).strip():
+            continue
+        section_id = f"sec_{uuid4().hex}"
+        section_type = _guess_module(title, markdown)
+        conn.execute(
+            """
+            insert into document_sections
+                (id, document_id, project_id, section_index, parent_section_id, title, level, page_start, page_end,
+                 markdown, plain_text, section_type, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                section_id,
+                document_id,
+                project_id,
+                index,
+                _section_value(section, "parent_section_id"),
+                title,
+                _to_int(_section_value(section, "level")),
+                _to_int(_section_value(section, "page_start")),
+                _to_int(_section_value(section, "page_end")),
+                str(markdown),
+                _plain_text_from_markdown(str(markdown)),
+                section_type,
+                now,
+            ),
+        )
+        for chunk in _semantic_chunks_from_markdown(
+            markdown=str(markdown),
+            section_title=title,
+            module=section_type,
+        ):
+            chunk_index += 1
+            chunk_id = f"chk_{uuid4().hex}"
+            chunk_ids.append(chunk_id)
+            conn.execute(
+                """
+                insert into document_chunks
+                    (id, project_id, document_id, section_id, chunk_index, chunk_type, module, title_path, content,
+                     content_markdown, page_start, page_end, source_text, tags_json, metadata_json, confirmed_status, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk_id,
+                    project_id,
+                    document_id,
+                    section_id,
+                    chunk_index,
+                    chunk["chunk_type"],
+                    section_type,
+                    chunk["title_path"],
+                    chunk["content"],
+                    chunk.get("content_markdown", ""),
+                    _to_int(_section_value(section, "page_start")),
+                    _to_int(_section_value(section, "page_end")),
+                    chunk["source_text"][:2000],
+                    dumps_json(chunk.get("tags", [])),
+                    dumps_json({**chunk.get("metadata", {}), "section_title": title, "section_id": section_id}),
+                    "未确认",
+                    now,
+                ),
+            )
+    return chunk_ids
+
+
+def _insert_project_profile(
+    conn: sqlite3.Connection,
+    project_id: str,
+    markdown: str,
+    values: dict[str, str],
+    now: str,
+) -> None:
+    conn.execute(
+        """
+        insert into project_profile
+            (id, project_id, project_name, project_code, project_category, service_period, package_no, budget_text,
+             budget_amount, buyer_name, agency_name, industry_domain, timeline_summary, implementation_scope,
+             technical_features, other_key_requirements, is_sme_reserved, is_blind_bid, source_text, confidence,
+             confirmed_status, created_at, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"profile_{uuid4().hex}",
+            project_id,
+            values.get("项目名称", ""),
+            values.get("项目编号", ""),
+            values.get("项目类别（服务类，货物类，工程类）和服务年限", ""),
+            values.get("项目类别（服务类，货物类，工程类）和服务年限", ""),
+            values.get("包号", ""),
+            values.get("项目规模和预算", ""),
+            _extract_amount(values.get("项目规模和预算", "")),
+            values.get("招标人", ""),
+            values.get("招标代理机构", ""),
+            values.get("项目所属领域", ""),
+            values.get("项目时间安排", ""),
+            values.get("项目要实施的具体内容", ""),
+            values.get("主要技术特点", ""),
+            values.get("其他关键要求", ""),
+            _to_bool_int(values.get("是否专门面向中小微企业采购", "")),
+            _to_bool_int(values.get("是否为暗标", "")),
+            markdown,
+            0.7,
+            "未确认",
+            now,
+            now,
+        ),
+    )
+
+
+def _insert_business_requirements(conn: sqlite3.Connection, project_id: str, markdown: str, now: str) -> None:
+    rows = _markdown_tables(markdown)
+    seen: set[str] = set()
+    if not rows:
+        for item in _structured_markdown_items(markdown, "商务内容"):
+            requirement = item["text"]
+            if is_duplicate_text(requirement, seen):
+                continue
+            conn.execute(
+                """
+                insert into business_requirements
+                    (id, project_id, requirement_type, item_name, requirement_text, amount, ratio, deadline_text,
+                     is_mandatory, source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"biz_{uuid4().hex}",
+                    project_id,
+                    _business_type(item["section"], item["item_name"]),
+                    item["item_name"],
+                    requirement,
+                    _extract_amount(requirement),
+                    _extract_ratio(requirement),
+                    _extract_deadline(requirement),
+                    _mandatory(requirement),
+                    item["section"],
+                    item["sequence"],
+                    item["source_text"],
+                    dumps_json(item["metadata"]),
+                    "未确认",
+                    now,
+                ),
+            )
+        return
+    for row in rows:
+        cells = row["cells"]
+        if len(cells) < 2:
+            continue
+        item_name, requirement = cells[0], " | ".join(cells[1:])
+        if not requirement.strip():
+            continue
+        if is_duplicate_text(f"{item_name} {requirement}", seen):
+            continue
+        conn.execute(
+            """
+            insert into business_requirements
+                (id, project_id, requirement_type, item_name, requirement_text, amount, ratio, deadline_text,
+                 is_mandatory, source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"biz_{uuid4().hex}",
+                project_id,
+                _business_type(row["section"], item_name),
+                item_name,
+                requirement,
+                _extract_amount(requirement),
+                _extract_ratio(requirement),
+                _extract_deadline(requirement),
+                _mandatory(requirement),
+                row["section"],
+                cells[0] if cells else "",
+                requirement,
+                dumps_json({"source_format": "markdown_table", "cells": cells}),
+                "未确认",
+                now,
+            ),
+        )
+
+
+def _insert_technical_requirements(conn: sqlite3.Connection, project_id: str, markdown: str, now: str) -> None:
+    rows = _markdown_tables(markdown)
+    seen: set[str] = set()
+    if rows:
+        for row in rows:
+            cells = row["cells"]
+            if not cells:
+                continue
+            if is_duplicate_text(" | ".join(cells), seen):
+                continue
+            conn.execute(
+                """
+                insert into technical_requirements
+                    (id, project_id, requirement_group, item_name, parameter_name, parameter_value, requirement_text,
+                     acceptance_criteria, is_mandatory, importance_level, source_heading, item_sequence, source_text,
+                     metadata_json, confirmed_status, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"tech_{uuid4().hex}",
+                    project_id,
+                    row["section"],
+                    cells[0],
+                    cells[0],
+                    cells[1] if len(cells) > 1 else "",
+                    " | ".join(cells),
+                    "",
+                    _mandatory(" | ".join(cells)),
+                    "高" if _mandatory(" | ".join(cells)) else "中",
+                    row["section"],
+                    cells[0] if cells else "",
+                    " | ".join(cells),
+                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    "未确认",
+                    now,
+                ),
+            )
+        return
+    for index, item in enumerate(_structured_markdown_items(markdown, "技术要求"), start=1):
+        requirement = item["text"]
+        if is_duplicate_text(requirement, seen):
+            continue
+        conn.execute(
+            """
+            insert into technical_requirements
+                (id, project_id, requirement_group, item_name, parameter_name, requirement_text, is_mandatory,
+                 importance_level, source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"tech_{uuid4().hex}",
+                project_id,
+                item["section"],
+                item["item_name"] or f"技术条目{index}",
+                item["item_name"] or f"技术条目{index}",
+                requirement,
+                _mandatory(requirement),
+                "高" if _mandatory(requirement) else "中",
+                item["section"],
+                item["sequence"],
+                item["source_text"],
+                dumps_json(item["metadata"]),
+                "未确认",
+                now,
+            ),
+        )
+
+
+def _insert_qualification_and_rejection(conn: sqlite3.Connection, project_id: str, markdown: str, now: str) -> None:
+    seen_qualification: set[str] = set()
+    seen_rejection: set[str] = set()
+    for row in _markdown_tables(markdown):
+        cells = row["cells"]
+        section = row["section"]
+        if not cells:
+            continue
+        if "废标" in section or "无效" in section or "否决" in section:
+            if is_duplicate_text(" | ".join(cells), seen_rejection):
+                continue
+            conn.execute(
+                """
+                insert into rejection_items
+                    (id, project_id, sequence_no, rejection_item, specific_behavior, risk_level, related_module,
+                     source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"rej_{uuid4().hex}",
+                    project_id,
+                    cells[0] if cells else "",
+                    cells[1] if len(cells) > 1 else cells[0],
+                    cells[2] if len(cells) > 2 else " | ".join(cells[1:]),
+                    "高",
+                    "资格",
+                    section,
+                    cells[0] if cells else "",
+                    " | ".join(cells),
+                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    "未确认",
+                    now,
+                ),
+            )
+        else:
+            if is_duplicate_text(" | ".join(cells), seen_qualification):
+                continue
+            conn.execute(
+                """
+                insert into qualification_requirements
+                    (id, project_id, review_type, sequence_no, requirement_text, required_materials, is_mandatory,
+                     risk_level, source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"qual_{uuid4().hex}",
+                    project_id,
+                    "符合性审查" if "符合" in section else "资格性审查",
+                    cells[0] if cells else "",
+                    cells[1] if len(cells) > 1 else cells[0],
+                    cells[2] if len(cells) > 2 else "",
+                    1,
+                    "高",
+                    section,
+                    cells[0] if cells else "",
+                    " | ".join(cells),
+                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    "未确认",
+                    now,
+                ),
+            )
+
+
+def _insert_scoring_items(conn: sqlite3.Connection, project_id: str, markdown: str, now: str) -> None:
+    seen: set[str] = set()
+    for row in _markdown_tables(markdown):
+        cells = row["cells"]
+        if len(cells) < 2:
+            continue
+        if is_duplicate_text(" | ".join(cells), seen):
+            continue
+        score_text = cells[2] if len(cells) > 2 else ""
+        conn.execute(
+            """
+            insert into scoring_items
+                (id, project_id, score_type, item_name, scoring_standard, score_value, score_text,
+                 source_heading, item_sequence, source_text, metadata_json, confirmed_status, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"score_{uuid4().hex}",
+                project_id,
+                "技术评分" if "技术" in row["section"] else "商务评分",
+                cells[0],
+                cells[1],
+                _extract_amount(score_text),
+                score_text,
+                row["section"],
+                cells[0],
+                " | ".join(cells),
+                dumps_json({"source_format": "markdown_table", "cells": cells}),
+                "未确认",
+                now,
+            ),
+        )
+
+
+def _insert_review_findings(conn: sqlite3.Connection, project_id: str, markdown: str, now: str) -> None:
+    if not str(markdown or "").strip() or "尚未执行" in str(markdown):
+        return
+    for index, paragraph in enumerate(_paragraphs(markdown)[:30], start=1):
+        if not any(keyword in paragraph for keyword in ("风险", "缺失", "失败", "需核对", "废标", "未命中")):
+            continue
+        conn.execute(
+            """
+            insert into review_findings
+                (id, project_id, review_type, module, risk_level, finding_title, finding_detail, source_text, suggestion, status, created_by, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"rf_{uuid4().hex}",
+                project_id,
+                "内容完整性",
+                "内容审查",
+                "高" if "废标" in paragraph or "失败" in paragraph else "中",
+                f"审查发现{index}",
+                paragraph,
+                paragraph,
+                "请人工核对原文和提取结果。",
+                "待处理",
+                "系统",
+                now,
+            ),
+        )
+
+
+def _parse_project_profile(markdown: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in str(markdown or "").splitlines():
+        clean = line.strip().strip("|").strip()
+        if not clean or "---" in clean:
+            continue
+        parts = [part.strip() for part in clean.split("|") if part.strip()]
+        if len(parts) >= 2:
+            key, value = parts[0], parts[1]
+        else:
+            match = re.match(r"^[#*\-\d.、\s]*([^：:]{2,60})[：:]\s*(.+)$", clean)
+            if not match:
+                continue
+            key, value = match.group(1).strip(), match.group(2).strip()
+        values[key] = value
+    return values
+
+
+def _markdown_tables(markdown: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    section = "未分组"
+    lines = str(markdown or "").splitlines()
+    table_lines: list[str] = []
+    for line in lines + [""]:
+        stripped = line.strip()
+        heading = re.match(r"^#{1,6}\s*(.+)$", stripped)
+        if heading:
+            if table_lines:
+                rows.extend(_parse_table_lines(table_lines, section))
+                table_lines = []
+            section = heading.group(1).strip()
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            table_lines.append(stripped)
+            continue
+        if table_lines:
+            rows.extend(_parse_table_lines(table_lines, section))
+            table_lines = []
+    return rows
+
+
+def _parse_table_lines(lines: list[str], section: str) -> list[dict[str, Any]]:
+    data_lines = [
+        line
+        for line in lines
+        if not re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", line)
+    ]
+    if len(data_lines) <= 1:
+        return []
+    output = []
+    for line in data_lines[1:]:
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if any(cells) and not all(cell in {"", "未提及", "未明确"} for cell in cells):
+            output.append({"section": section, "cells": cells})
+    return output
+
+
+def _paragraphs(markdown: str) -> list[str]:
+    return [
+        re.sub(r"^[#*\-\d.、\s]+", "", line).strip()
+        for line in str(markdown or "").splitlines()
+        if line.strip() and not line.strip().startswith("|")
+    ]
+
+
+def _structured_markdown_items(markdown: str, default_section: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    current_section = default_section
+    current_item = default_section
+    current_item_seq = ""
+    bullet_index = 0
+    fallback_index = 0
+
+    for raw_line in str(markdown or "").splitlines():
+        line = _clean_markdown_inline(raw_line.strip())
+        if not line or line.startswith("|") or re.match(r"^\|?\s*:?-{3,}:?", line):
+            continue
+
+        heading = re.match(r"^#{1,6}\s*(.+)$", raw_line.strip())
+        chinese_heading = re.match(r"^([一二三四五六七八九十]+)[、.．]\s*(.+)$", line)
+        numbered_title = re.match(r"^(\d+(?:\.\d+)*)[.、]\s*(.+)$", line)
+        bullet = re.match(r"^[-*+]\s*(.+)$", line)
+
+        if heading:
+            current_section = _clean_markdown_inline(heading.group(1))
+            current_item = current_section
+            current_item_seq = ""
+            bullet_index = 0
+            continue
+        if chinese_heading:
+            current_section = chinese_heading.group(2).strip()
+            current_item = current_section
+            current_item_seq = chinese_heading.group(1)
+            bullet_index = 0
+            continue
+        if numbered_title and _looks_like_item_title(numbered_title.group(2)):
+            current_item_seq = numbered_title.group(1)
+            current_item = numbered_title.group(2).strip()
+            bullet_index = 0
+            continue
+
+        text = ""
+        sequence = ""
+        if bullet:
+            bullet_index += 1
+            text = bullet.group(1).strip()
+            sequence = f"{current_item_seq}.{bullet_index}" if current_item_seq else str(bullet_index)
+        elif numbered_title:
+            fallback_index += 1
+            sequence = numbered_title.group(1)
+            text = numbered_title.group(2).strip()
+        elif len(line) >= 8:
+            fallback_index += 1
+            sequence = f"{current_item_seq}.{fallback_index}" if current_item_seq else str(fallback_index)
+            text = line
+
+        text = _clean_markdown_inline(text)
+        if not text:
+            continue
+        items.append(
+            {
+                "section": current_section or default_section,
+                "item_name": current_item or default_section,
+                "sequence": sequence,
+                "text": text,
+                "source_text": raw_line.strip(),
+                "metadata": {
+                    "source_format": "markdown_list",
+                    "section": current_section or default_section,
+                    "parent_item": current_item or default_section,
+                    "sequence": sequence,
+                },
+            }
+        )
+
+    return items
+
+
+def _semantic_chunks_from_markdown(markdown: str, section_title: str, module: str) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for row_index, row in enumerate(_markdown_tables(markdown), start=1):
+        cells = [cell for cell in row["cells"] if str(cell).strip()]
+        content = " | ".join(cells).strip()
+        if not content or is_duplicate_text(content, seen):
+            continue
+        chunks.append(
+            {
+                "chunk_type": "表格行",
+                "title_path": f"{section_title} > {row['section']}",
+                "content": content,
+                "content_markdown": "| " + " | ".join(cells) + " |",
+                "source_text": content,
+                "tags": [module, "表格"],
+                "metadata": {
+                    "source_format": "markdown_table",
+                    "row_index": row_index,
+                    "cells": cells,
+                },
+            }
+        )
+
+    for item in _structured_markdown_items(markdown, section_title):
+        content = item["text"].strip()
+        if not content or is_duplicate_text(content, seen):
+            continue
+        chunks.append(
+            {
+                "chunk_type": _semantic_chunk_type(module, content),
+                "title_path": f"{section_title} > {item['section']} > {item['item_name']}",
+                "content": content,
+                "content_markdown": item["source_text"],
+                "source_text": item["source_text"],
+                "tags": [module, item["section"], item["item_name"]],
+                "metadata": item["metadata"],
+            }
+        )
+
+    if chunks:
+        return chunks
+
+    for index, paragraph in enumerate(_merge_short_paragraphs(_paragraphs(markdown)), start=1):
+        content = paragraph.strip()
+        if not content or is_duplicate_text(content, seen):
+            continue
+        chunks.append(
+            {
+                "chunk_type": _semantic_chunk_type(module, content),
+                "title_path": section_title,
+                "content": content,
+                "content_markdown": content,
+                "source_text": content,
+                "tags": [module],
+                "metadata": {
+                    "source_format": "paragraph",
+                    "paragraph_index": index,
+                },
+            }
+        )
+    return chunks
+
+
+def _semantic_chunk_type(module: str, content: str) -> str:
+    text = f"{module} {content}"
+    if "技术" in module:
+        return "技术要求"
+    if "商务" in module:
+        return "商务条款"
+    if "评分" in module:
+        return "评分项"
+    if "资格" in module:
+        return "资格条款"
+    if re.search(r"资格|符合性|营业执照|资质|证书", text):
+        return "资格条款"
+    if re.search(r"废标|无效|否决|重大偏差", text):
+        return "废标项"
+    if re.search(r"评分|评审|分值|得分", text):
+        return "评分项"
+    if re.search(r"商务|合同|付款|交付|验收|保证金|售后", text):
+        return "商务条款"
+    if re.search(r"技术|参数|系统|功能|性能|实施|服务", text):
+        return "技术要求"
+    return "段落"
+
+
+def _merge_short_paragraphs(paragraphs: list[str], target_chars: int = 900) -> list[str]:
+    merged: list[str] = []
+    buffer: list[str] = []
+    length = 0
+    for paragraph in paragraphs:
+        text = paragraph.strip()
+        if not text:
+            continue
+        if buffer and length + len(text) > target_chars:
+            merged.append("\n".join(buffer))
+            buffer = []
+            length = 0
+        buffer.append(text)
+        length += len(text)
+    if buffer:
+        merged.append("\n".join(buffer))
+    return merged
+
+
+def _clean_markdown_inline(value: str) -> str:
+    value = str(value or "").strip()
+    value = re.sub(r"^\s*>+\s*", "", value)
+    value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+    value = re.sub(r"`([^`]*)`", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _looks_like_item_title(text: str) -> bool:
+    text = _clean_markdown_inline(text)
+    if not text:
+        return False
+    if len(text) <= 40 and not re.search(r"[。；;，,]$", text):
+        return True
+    return False
+
+
+def _section_value(section: Any, key: str) -> str:
+    if isinstance(section, dict):
+        return str(section.get(key) or "")
+    return str(getattr(section, key, "") or "")
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        text = str(value or "").strip()
+        return int(text) if text else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _plain_text_from_markdown(markdown: str) -> str:
+    lines = []
+    for line in str(markdown or "").splitlines():
+        clean = line.strip()
+        if not clean or re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", clean):
+            continue
+        clean = clean.replace("|", " ")
+        clean = re.sub(r"^[#*\-\d.、\s]+", "", clean).strip()
+        clean = re.sub(r"\s+", " ", clean)
+        if clean:
+            lines.append(clean)
+    return "\n".join(lines)
+
+
+def _guess_module(title: str, content: str) -> str:
+    text = f"{title}\n{content}"
+    if re.search(r"资格|符合|废标|无效|否决", text):
+        return "资格审查"
+    if re.search(r"评分|评审|分值|得分", text):
+        return "评分要求"
+    if re.search(r"商务|合同|付款|交付|保证金", text):
+        return "商务内容"
+    if re.search(r"技术|参数|服务方案|实施方案", text):
+        return "技术要求"
+    return "投标人须知"
+
+
+def _business_type(section: str, item_name: str) -> str:
+    text = f"{section} {item_name}"
+    for keyword in ("报价", "合同", "付款", "交付", "验收", "保证金", "售后", "联合体", "分包"):
+        if keyword in text:
+            return keyword
+    return "其他"
+
+
+def _extract_amount(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(万|万元|元|分)?", str(text or ""))
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2) or ""
+    return value * 10000 if "万" in unit else value
+
+
+def _extract_ratio(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(text or ""))
+    return float(match.group(1)) / 100 if match else None
+
+
+def _extract_deadline(text: str) -> str:
+    match = re.search(r"[^，。；;\n]*(?:日内|天内|工作日|截止|期限|服务期|交付)[^，。；;\n]*", str(text or ""))
+    return match.group(0).strip() if match else ""
+
+
+def _mandatory(text: str) -> int | None:
+    if re.search(r"必须|不得|应当|应|须|★|实质性|无效|废标", str(text or "")):
+        return 1
+    return None
+
+
+def _to_bool_int(text: str) -> int | None:
+    value = str(text or "")
+    if re.search(r"是|专门|面向|true", value, re.IGNORECASE):
+        return 1
+    if re.search(r"否|不是|非|false", value, re.IGNORECASE):
+        return 0
+    return None

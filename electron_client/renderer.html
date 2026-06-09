@@ -20,35 +20,42 @@
         <button class="collapse-btn" type="button" aria-label="收起侧栏">‹</button>
 
         <nav class="tool-nav">
-          <button class="tool-item active" type="button">
+          <button class="tool-item active" type="button" data-tool-view="parse">
             <span class="tool-icon">▣</span>
             <span>
               <strong>招标解析</strong>
               <small>标书生成</small>
             </span>
           </button>
-          <button class="tool-item" type="button">
+          <button class="tool-item" type="button" data-tool-view="projects">
+            <span class="tool-icon">▧</span>
+            <span>
+              <strong>项目库</strong>
+              <small>结构化结果核对</small>
+            </span>
+          </button>
+          <button class="tool-item" type="button" data-tool-view="businessBid">
             <span class="tool-icon">▤</span>
             <span>
               <strong>商务标</strong>
               <small>商务响应与报价材料</small>
             </span>
           </button>
-          <button class="tool-item" type="button">
+          <button class="tool-item" type="button" data-tool-view="knowledge">
             <span class="tool-icon">▦</span>
             <span>
               <strong>知识库</strong>
               <small>素材、模板和案例资产</small>
             </span>
           </button>
-          <button class="tool-item" type="button">
+          <button class="tool-item" type="button" data-tool-view="duplicateCheck">
             <span class="tool-icon">≋</span>
             <span>
               <strong>标书查重</strong>
               <small>相似度与重复表达检测</small>
             </span>
           </button>
-          <button class="tool-item" type="button">
+          <button class="tool-item" type="button" data-tool-view="rejectionCheck">
             <span class="tool-icon">◼</span>
             <span>
               <strong>废标项检查</strong>
@@ -198,6 +205,122 @@
           </div>
         </section>
 
+        <section id="knowledgeWorkspace" class="knowledge-workspace hidden">
+          <header class="knowledge-header">
+            <div>
+              <p class="step-kicker">KNOWLEDGE</p>
+              <h2>知识库</h2>
+              <span>沉淀公司能力、资质、人员、财务、业绩、历史案例、投标文件和方案素材。</span>
+            </div>
+            <div class="knowledge-actions">
+              <button id="knowledgeExportBtn" class="ghost-btn" type="button">导出 JSON</button>
+              <button id="knowledgeImportBtn" class="ghost-btn" type="button">导入 JSON</button>
+              <input id="knowledgeImportFile" type="file" accept=".json" hidden />
+            </div>
+          </header>
+
+          <div class="knowledge-shell">
+            <aside class="knowledge-types" id="knowledgeTypes"></aside>
+
+            <section class="knowledge-list-panel">
+              <div class="knowledge-panel-title">
+                <div>
+                  <h3 id="knowledgeTypeTitle">公司信息</h3>
+                  <p id="knowledgeTypeDesc">维护公司基础介绍、联系方式、经营范围等。</p>
+                </div>
+                <button id="knowledgeNewBtn" class="primary-mini-btn" type="button">新建</button>
+              </div>
+              <div class="knowledge-search-row">
+                <input id="knowledgeSearch" type="search" placeholder="搜索名称、标签、备注" />
+              </div>
+              <div id="knowledgeList" class="knowledge-list"></div>
+            </section>
+
+            <section class="knowledge-editor">
+              <div class="knowledge-panel-title">
+                <div>
+                  <h3 id="knowledgeEditorTitle">新建知识条目</h3>
+                  <p id="knowledgeEditorHint">填写后保存到本地知识库。</p>
+                </div>
+                <button id="knowledgeDeleteBtn" class="ghost-btn danger-btn hidden" type="button">删除</button>
+              </div>
+
+              <div class="knowledge-form">
+                <label>
+                  标题 / 名称
+                  <input id="knowledgeTitle" type="text" placeholder="例如：公司简介、ISO9001证书、项目经理张三" />
+                </label>
+                <label>
+                  标签
+                  <input id="knowledgeTags" type="text" placeholder="多个标签用逗号分隔，例如：软件,政府采购,售后" />
+                </label>
+                <label>
+                  有效期 / 时间
+                  <input id="knowledgeDate" type="text" placeholder="例如：2026-12-31、2023-2025、长期有效" />
+                </label>
+                <label>
+                  关联文件
+                  <input id="knowledgeFiles" type="text" placeholder="填写文件路径或说明，可后续接附件管理" />
+                </label>
+                <label class="knowledge-wide">
+                  结构化内容
+                  <textarea id="knowledgeContent" placeholder="填写正文、证书信息、人员经历、财务指标、项目业绩、案例复盘或方案素材。"></textarea>
+                </label>
+                <label class="knowledge-wide">
+                  备注 / 使用建议
+                  <textarea id="knowledgeNotes" placeholder="记录适用场景、风险提示、可复用段落、投标注意事项。"></textarea>
+                </label>
+              </div>
+
+              <div class="knowledge-editor-actions">
+                <span id="knowledgeStatus">本地保存，暂不上传服务器。</span>
+                <button id="knowledgeSaveBtn" class="next-btn" type="button">保存</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="projectWorkspace" class="project-workspace hidden">
+          <header class="knowledge-header">
+            <div>
+              <p class="step-kicker">PROJECTS</p>
+              <h2>项目库</h2>
+              <span>查看解析入库后的项目、章节、条款、评分点和审查发现，并完成人工确认。</span>
+            </div>
+            <div class="knowledge-actions">
+              <button id="projectDeleteBtn" class="ghost-btn danger-btn hidden" type="button">删除项目</button>
+              <button id="projectRefreshBtn" class="ghost-btn" type="button">刷新</button>
+            </div>
+          </header>
+
+          <div class="project-shell">
+            <section class="project-list-panel">
+              <div class="knowledge-panel-title">
+                <div>
+                  <h3>项目列表</h3>
+                  <p id="projectListHint">从 SQLite 读取已入库项目。</p>
+                </div>
+              </div>
+              <div class="knowledge-search-row">
+                <input id="projectSearch" type="search" placeholder="搜索项目名称、编号、招标人、代理机构" />
+              </div>
+              <div id="projectList" class="knowledge-list"></div>
+            </section>
+
+            <section class="project-detail-panel">
+              <div class="knowledge-panel-title">
+                <div>
+                  <h3 id="projectDetailTitle">请选择项目</h3>
+                  <p id="projectDetailHint">选择左侧项目后查看结构化抽取结果。</p>
+                </div>
+              </div>
+              <div id="projectSummary" class="project-summary"></div>
+              <div id="projectTabs" class="module-tabs project-tabs"></div>
+              <div id="projectTableContent" class="project-table-content"></div>
+            </section>
+          </div>
+        </section>
+
         <section class="content-card">
           <header class="content-header">
             <div>
@@ -242,6 +365,7 @@
               <div class="panel-actions">
                 <button class="ghost-btn" type="button" data-copy="businessOutput">复制</button>
                 <button class="ghost-btn" type="button" data-expand="businessOutput" data-title="商务内容">展开</button>
+                <button class="ghost-btn" type="button" data-edit="businessOutput" data-title="编辑商务内容">编辑</button>
                 <button class="ghost-btn" type="button" data-export="businessOutput" data-name="商务内容.txt">导出</button>
               </div>
             </div>
@@ -254,6 +378,7 @@
               <div class="panel-actions">
                 <button class="ghost-btn" type="button" data-copy="technicalOutput">复制</button>
                 <button class="ghost-btn" type="button" data-expand="technicalOutput" data-title="技术要求">展开</button>
+                <button class="ghost-btn" type="button" data-edit="technicalOutput" data-title="编辑技术要求">编辑</button>
                 <button class="ghost-btn" type="button" data-export="technicalOutput" data-name="技术要求.txt">导出</button>
               </div>
             </div>
@@ -266,6 +391,7 @@
               <div class="panel-actions">
                 <button class="ghost-btn" type="button" data-copy="qualificationTables">复制</button>
                 <button class="ghost-btn" type="button" data-expand="qualificationTables" data-title="资格审查">展开</button>
+                <button class="ghost-btn" type="button" data-edit="qualificationTables" data-title="编辑资格审查">编辑</button>
               </div>
             </div>
             <div class="output-area module-view">
@@ -280,6 +406,7 @@
               <div class="panel-actions">
                 <button class="ghost-btn" type="button" data-copy="scoringTables">复制</button>
                 <button class="ghost-btn" type="button" data-expand="scoringTables" data-title="评分要求">展开</button>
+                <button class="ghost-btn" type="button" data-edit="scoringTables" data-title="编辑评分要求">编辑</button>
               </div>
             </div>
             <div class="output-area module-view">
@@ -319,6 +446,7 @@
                 <button id="runContentReviewBtn" class="ghost-btn" type="button">执行审查</button>
                 <button class="ghost-btn" type="button" data-copy="contentReviewOutput">复制</button>
                 <button class="ghost-btn" type="button" data-expand="contentReviewOutput" data-title="内容审查">展开</button>
+                <button class="ghost-btn" type="button" data-edit="contentReviewOutput" data-title="编辑内容审查">编辑</button>
                 <button class="ghost-btn" type="button" data-export="contentReviewOutput" data-name="内容审查.md">导出</button>
               </div>
             </div>

@@ -22,6 +22,8 @@ from bid_parse_strategy import (
     resolve_parse_method,
 )
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_database import save_analysis_result
+from extraction_cleaner import clean_repeated_extraction_text
 from llm_client import LLM_Invoke
 from llm_model_config import apply_llm_env_selection
 
@@ -167,13 +169,13 @@ def analyze_bid_document(
         image_ocr_chars=image_ocr_chars,
         preflight_profile=preflight_profile,
     )
-    return BidAnalysisResult(
+    result = BidAnalysisResult(
         sections=sections,
-        project_overview=project_overview,
-        business_content=business_content,
-        technical_scoring_requirements=technical_scoring_requirements,
-        qualification_compliance_requirements=qualification_compliance_requirements,
-        price_scoring_requirements=price_scoring_requirements,
+        project_overview=clean_repeated_extraction_text(project_overview),
+        business_content=clean_repeated_extraction_text(business_content),
+        technical_scoring_requirements=clean_repeated_extraction_text(technical_scoring_requirements),
+        qualification_compliance_requirements=clean_repeated_extraction_text(qualification_compliance_requirements),
+        price_scoring_requirements=clean_repeated_extraction_text(price_scoring_requirements),
         image_analysis_markdown=image_analysis_markdown,
         image_analysis_items=image_analysis_items,
         parse_method_used=parse_method_used,
@@ -182,4 +184,15 @@ def analyze_bid_document(
         content_review_markdown="内容审查尚未执行，请在前端点击“执行审查”。",
         content_review_report={},
     )
+    try:
+        save_analysis_result(
+            sections=[section.model_dump() for section in sections],
+            analysis=result.model_dump(),
+            file_name=Path(document).name,
+            document_type="招标文件",
+            parse_method=parse_method_used,
+        )
+    except Exception:
+        pass
+    return result
 # 这个脚本负责把文件解析结果交给大模型，并汇总招标分析结果。
