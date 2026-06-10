@@ -30,6 +30,7 @@ KNOWLEDGE_TYPES = {
 
 def init_database(db_path: Path = DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    vector_index_result: dict[str, Any] = {}
     with _connect(db_path) as conn:
         conn.executescript(
             """
@@ -837,12 +838,20 @@ def save_analysis_result(
             ),
         )
 
+    try:
+        from bid_vector_store import index_project_chunks
+
+        vector_index_result = index_project_chunks(project_id, db_path=db_path)
+    except Exception as exc:
+        vector_index_result = {"enabled": False, "indexed": 0, "reason": str(exc)}
+
     return {
         "project_id": project_id,
         "document_id": document_id,
         "chunk_count": len(chunk_ids),
         "project_name": project_name,
         "database_path": str(db_path),
+        "vector_index": vector_index_result,
     }
 
 

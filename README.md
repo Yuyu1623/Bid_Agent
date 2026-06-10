@@ -16,32 +16,19 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
    -> 识别原生文本、扫描件、图文混排、表格、图片和页段结构
 
 2. 结构化抽取层 `[已完成基础版，持续增强中]`
-   ** 核心目标：能不能用原子化输出确保下游可用，解决能不能抽出来，抽出来准不准，全不全的问题 **
-   -> 第一次先调用大模型，只生成全局 project_profile 和全文 section_tree，统一项目名称、编号、预算、招标人、代理机构、采购方式、分包等基础字段，section_tree 记录章节标题、层级、起始位置/页码、标题路径和模块线索，作为后续专项抽取的结构锚点
-   -> 专项抽取阶段带着 project_profile 和 section_tree 作为上下文，并要求模型不得修改项目基本信息，只能从指定候选章节范围内提取
-   -> 商务内容、技术要求、资格审查、评分要求四路并发调用大模型，减少项目基础字段冲突
-   -> 资格审查 / 废标项增加轻量模型逐章预筛：先标出疑似资格、符合性审查、废标/否决投标段落，再并入资格审查精提取上下文，提升全覆盖率以及召回率
-   -> 专项抽取默认使用 JSON Schema 结构化输出，强制每个原子条目带 source_chunk_id、source_text、source_heading 和 evidence_snippet，便于溯源、人工复核和 golden evidence 测试
-   -> 风险等级、状态、评分类型、废标法律性质等字段使用 enum 约束，如风险等级统一为“高/中/低/未明确”，废标法律性质统一为“资格性/符合性/响应性/其他”
-   -> 入库时补充标准化 metadata：金额尽量统一为“数字 + CNY”，期限尽量统一为日历天数，日期尽量统一为 ISO 日期
-   -> 入库时构建跨模块引用：商务要求会根据 source_chunk_id 和关键词相似度关联相关技术要求、评分项，写入 related_tech_requirement_ids 和 related_scoring_item_ids
-   -> 候选片段召回从“规则匹配”升级为“宽关键词 + 章节标题 + 模块语义 query + 规则重排”的混合检索基础版；后续可接 chunk_embeddings、Chroma / FAISS / Qdrant 做真正向量召回和双向排序
-   -> Prompt 要求按“一个要求 / 一个材料 / 一个评分点一行”的原子粒度输出，减少长段堆叠和复读
-   -> 投标人须知清洗为 project_profile，并同步项目名称、编号、预算、招标人、代理机构等项目主字段
-   -> 商务内容清洗为 business_requirements，按表格行或 Markdown 小点拆成独立条款，覆盖报价、合同、付款、交付、验收、保证金、售后等条款
-   -> 技术要求清洗为 technical_requirements，按标题层级和列表小点拆成独立要求，覆盖技术参数、服务要求、实施要求、验收标准
-   -> 资格审查清洗为 qualification_requirements，区分资格性审查和符合性审查
-   -> 废标项清洗为 rejection_items，保留废标项、具体表现、风险等级和原文证据
-   -> 评分要求清洗为 scoring_items，区分商务评分、技术评分、评分标准和分值
-   -> 内容审查结果清洗为 review_findings，保留风险、缺失项、建议和待处理状态
-   -> 解析后的章节写入 document_sections，语义切片写入 document_chunks
-   -> document_chunks 不按整章粗切，而是优先按 Markdown 表格行、列表小点、业务条款和段落块切成 RAG 最小语义单元
-   -> 表格切片会记录 header_paths 和 cell_header_map，尽量保留两层表头、合并单元格附近的表头语义
-   -> document_chunks 的 metadata 统一携带 hierarchy_path、item_type、parent_table_header、importance_score、module 和 vector_filter，便于后续向量检索按章节、模块、表格行等条件过滤
-   -> 每个章节会额外生成“章节摘要”chunk，作为 section_summary / module aggregate 的向量入口，后续可根据引用频率或人工反馈动态调整 importance_score
-   -> 当前已完成 SQLite 基础入库；向量索引通过 chunk_embeddings 预留映射，后续接 Chroma / FAISS / Qdrant
+   ** 核心目标：把招标文件抽成可入库、可溯源、可检索、可生成的原子数据。 **
+   -> 先抽全局 project_profile 和 section_tree，统一项目基础信息和章节层级，给后续专项抽取提供结构锚点
+   -> 再按模块抽取投标人须知、商务内容、技术要求、资格审查、废标项、评分要求，输出 JSON Schema 结构化对象
+   -> 每条原子数据都保留 source_chunk_id、source_text、source_heading、evidence_snippet，方便回查原文和人工复核
+   -> 表格清洗为独立业务行：商务条款、技术参数、资格要求、废标情形、评分点分别入库为对应表
+   -> 入库时做基础标准化：金额统一为 CNY 数值，期限统一为日历天数，日期统一为 ISO 格式，风险等级和状态使用 enum
+   -> 通过 source_chunk_id 和关键词相似度建立跨模块引用，例如商务要求关联技术要求、评分项，为后续生成检查清单做准备
+   -> 资格审查和废标项先用宽关键词、章节标题和规则重排召回疑似片段，再交给轻量模型复核，最后由大模型精提取，兼顾速度、召回率和完整性
+   -> RAG 切片不按整章粗切，而是按表格行、列表项、业务条款、段落块和章节摘要切成 document_chunks
+   -> 每个 chunk 携带 hierarchy_path、item_type、parent_table_header、importance_score、module、vector_filter 等 metadata
+   -> 向量索引使用 sentence-transformers 中的 BAAI/bge-large-zh-v1.5 模型，再用 ChromaDB 持久化索引；chunk_embeddings 记录 SQLite chunk 与 Chroma vector_id 的映射，重排模型选用 BAAI/bge-reranker-v2-m3 模型。
 
-3. 知识沉淀层 `[SQLite 基础版完成，向量检索规划中]`
+3. 知识沉淀层 `[SQLite 基础版完成，Chroma 向量索引基础版已接入]`
    ** 核心目标：将解析后的结构化信息（如条款、评分点）与原始文档的语义切片（document_chunks）持久化、标准化，并建立起可追溯、可检索、可进化的一套知识基底。
    -> 建立企业内部数据库，包括公司信息、资质管理、人员信息、财务信息、业绩信息、历史投标文件
    -> 建立项目表，沉淀项目名称、编号、预算、招标人、代理机构、时间节点
@@ -131,45 +118,54 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 
 ## 功能概览
 
-- 支持上传 PDF、Word、图片、HTML 等招标文件
-- 支持自动解析策略推荐，也支持手动选择解析方式
-- 支持 PDF 类型预检：原生文本 PDF、扫描件 PDF、图文混排 PDF
-- 支持手动选择 PyMuPDF4LLM 快速解析原生文本 PDF
-- 支持手动选择 Docling 解析表格、章节层级和结构复杂的原生 PDF
-- 支持 MinerU VLM、MinerU Pipeline、MinerU-HTML
-- 支持长 PDF / 含图 PDF 使用 MinerU 并行页段解析
-- 支持本地 MinerU Pipeline
-- `auto` 仅对无图、无表、页数较少、文本层稳定的极简纯文本 PDF 使用 `pdfplumber`
-- 非极简纯文本的原生 PDF 默认优先使用 MinerU Pipeline；扫描件、图文混排和多模态内容优先使用 MinerU VLM 或 MinerU 并行页段
-- 支持 `docx2python`、`python-docx` Word 解析
-- 支持 DOCX 图片位置提取，记录图片位于哪个段落或表格单元格附近，并通过 OCR 和启发式规则识别公章、签字、图表等线索
-- 支持 PDF / DOCX 图片提取和 OCR，使用 RapidOCR / Tesseract 作为本地补充
-- 支持大模型流式输出和非流式输出
-- 支持大模型两阶段抽取：先生成 project_profile 和 section_tree，再并发执行四个专项抽取任务
-- 支持专项抽取携带全局项目画像和章节树，要求模型不得改写项目基础字段，只能从指定候选章节范围内提取
-- 支持五个模块先按宽关键词、章节标题和模块语义 query 召回候选片段，再通过规则重排、标题加权、噪声扣分和 Top 候选截断后交给大模型提取，减少全文重复输入和噪声干扰
-- 支持面向小模型的 Prompt 收紧：要求按原子粒度输出，一个要求、材料或评分点尽量单独一行
-- 支持大模型提取结果后处理去重，会按表格行、句子、小点和《材料名称》识别重复内容，减少复读和冗余入库
-- 解析结果统一为 Markdown + 结构化元数据，章节元数据包括标题路径、表格 JSON、图片 JSON 和页码线索
-- 支持修改解析后的内容并重新分析
-- 知识库前端基础版已完成，支持公司信息、资质管理、人员信息、财务信息、业绩信息、历史案例库、历史投标文件和方案素材库八类知识资产录入
-- 知识库支持本地保存、搜索、新建、编辑、删除、JSON 导入和 JSON 导出
-- 项目库基础版已完成，支持查看 SQLite 中的项目列表、来源文件、章节、切片、项目概览、商务要求、技术要求、资格审查、废标项、评分项和审查发现
-- 项目库定位为结构化结果展示页，不再要求用户逐条确认
-- 项目库支持删除整个项目，或删除单条结构化记录，便于清理测试数据和错误抽取项
-- Electron 客户端支持自动启动 FastAPI 后端，并通过 `/health` 做端口连通性检查
-- 后端连接失败时，前端会显示端口、后端目录、健康检查结果和最近启动日志，便于定位依赖、端口占用或 Python 启动问题
-- 前端按五大模块展示：投标人须知、商务内容、技术要求、资格审查、评分要求
-- 投标人须知中的“各种时间安排”会汇总网上报名、获取文件、澄清答疑、投标截止、开标、保证金、项目实施/交付/服务等时间节点
-- 投标人须知支持按钮项：是否专门面向中小微企业采购、是否为暗标、是否允许代理商投标、是否允许联合体投标；原文未提及或无法判断时默认“否”
-- 资格审查支持资格性审查、符合性审查、废标项切换查看
-- 评分要求支持商务评分、技术评分切换查看
-- 商务内容、技术要求、内容审查统一使用 Markdown 展示区，Markdown 表格会直接渲染为可读表格
-- 图片解析支持图片卡片展示，保留图片预览、OCR 文本和 AI 备注
-- 各模块支持展开查看，展开后仍保留 Markdown 表格和图片卡片，不会退化为纯文本
-- 投标人须知字段可直接编辑；商务内容、技术要求、资格审查、评分要求和内容审查支持编辑原始 Markdown，保存后自动重新渲染表格
-- 解析完成后可手动执行内容审查，使用正则匹配、关键词回查、原文证据片段和提取结果溯源比对各模块提取内容的完整性与准确性；也可选择支持深度思考的模型追加复核意见
-- 评分要求会先按“评分、评审、分值、商务评审、技术评审”等关键词筛选上下文，提高长文档提取稳定性
+- **文件解析**：支持 PDF、Word、图片、HTML；自动判断原生文本、扫描件、图文混排和表格/图片内容，按文件特征选择 pdfplumber、MinerU、OCR、docx2python 等解析方式。
+- **结构化抽取**：先生成项目画像和章节树，再抽取投标人须知、商务内容、技术要求、资格审查、废标项和评分要求；结果按 JSON Schema 输出为可入库的原子条目。
+- **前端展示与编辑**：按五大模块展示解析结果，支持 Markdown 表格渲染、图片卡片展示、字段编辑和重新分析；投标人须知包含各种时间安排、暗标、代理商投标、联合体投标等按钮字段。
+- **项目库与知识库**：解析结果写入 SQLite，可查看项目、章节、切片、条款、评分点和审查发现；知识库支持公司信息、资质、人员、财务、业绩、历史案例、历史投标文件和方案素材管理。
+- **RAG 检索**：document_chunks 按表格行、列表项、业务条款、段落块和章节摘要切片；使用 `BAAI/bge-large-zh-v1.5` 生成 Chroma 向量索引，并用 `BAAI/bge-reranker-v2-m3` 重排；项目库内置智能检索入口，可按当前项目召回原文证据、章节路径、chunk_id 和 metadata。
+- **审查与运维**：支持手动执行内容审查，回查原文证据并识别缺失、矛盾和废标风险；Electron 可自动启动 FastAPI 后端，并通过 `/health` 做端口和连通性检查。
+
+## Chroma 向量索引
+
+项目解析并结构化入库后，后端会自动尝试把 `document_chunks` 写入本地 Chroma。SQLite 仍是主数据库，Chroma 负责语义检索；`chunk_embeddings` 表会记录 SQLite `chunk_id` 与 Chroma `vector_id` 的映射。
+
+启用条件：
+
+```env
+BID_VECTOR_STORE_ENABLED=true
+HF_ENDPOINT=https://hf-mirror.com
+CHROMA_PERSIST_DIR=.chroma
+CHROMA_COLLECTION=bid_document_chunks
+EMBEDDING_PROVIDER=sentence_transformers
+EMBEDDING_MODEL_ID=BAAI/bge-large-zh-v1.5
+RERANKER_ENABLED=true
+RERANKER_MODEL_ID=BAAI/bge-reranker-v2-m3
+RERANKER_TOP_K_MULTIPLIER=4
+```
+
+默认使用 `sentence-transformers` 本地加载 `BAAI/bge-large-zh-v1.5` 生成 chunk 向量，并用 `BAAI/bge-reranker-v2-m3` 对 Chroma 初召回结果重排。后端默认优先使用 `HF_ENDPOINT=https://hf-mirror.com` 下载 HuggingFace 模型；如需使用官方源，可在 `.env` 中覆盖该变量。若要改用 OpenAI-compatible embedding，可设置 `EMBEDDING_PROVIDER=openai`，并配置 `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL` 和远程 embedding 模型名。
+
+前端项目库已接入该接口：选择项目后，在“智能检索”里输入问题，默认只检索当前项目，可按模块过滤并展示命中的原文片段、章节路径、页码、chunk_id 和 `metadata_json`。
+
+向量查询接口：
+
+```text
+POST http://127.0.0.1:8000/vector/search
+```
+
+请求示例：
+
+```json
+{
+  "project_id": "prj_xxx",
+  "query": "付款方式、履约保证金、发票要求",
+  "module": "商务内容",
+  "item_type": "表格行",
+  "top_k": 8
+}
+```
+
+可过滤字段来自 `document_chunks` 基础列和 `metadata_json`，包括 `project_id`、`module`、`item_type`、`hierarchy_path`、`parent_table_header` 等。删除项目时，后端会同步尝试删除该项目在 Chroma 中的向量。
 
 ## 项目结构
 
@@ -182,6 +178,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ├── bid_document_parser.py     # 招标文件解析入口和章节拆分
 ├── bid_parse_strategy.py      # 解析方式推荐和解析质量报告
 ├── bid_section_retriever.py   # 模块候选片段混合召回，减少大模型全文重复读取
+├── bid_vector_store.py        # Chroma 向量索引、embedding 和语义检索接口
 ├── bid_qualification_prefilter.py # 资格审查/废标项轻量模型逐章预筛
 ├── bid_image_analysis.py      # 文档图片分析和 OCR 辅助能力
 ├── bid_database.py            # SQLite 数据库初始化、知识库 CRUD 和结构化入库
@@ -239,6 +236,8 @@ Python 依赖包括：
 - `pypdf`：PDF 按页段拆分，用于 MinerU 并行页段解析
 - `docx2python`、`python-docx`：Word 文档解析
 - `pillow`、`opencv-python`、`rapidocr-onnxruntime`、`pytesseract`：图片和 OCR 辅助解析
+- `chromadb`：本地向量库，用于对 `document_chunks` 建立 Chroma 语义索引
+- `sentence-transformers`：本地加载 `BAAI/bge-large-zh-v1.5` 和 `BAAI/bge-reranker-v2-m3`，用于 chunk embedding 和 rerank
 - `requests`、`pydantic`、`python-multipart`：接口、校验和上传支持
 
 ## 安装 Electron 客户端依赖
@@ -270,15 +269,29 @@ LLM_API_KEY=your-api-key
 LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
 LLM_TIMEOUT=120
 LLM_MAX_CONCURRENCY=5
-LLM_STREAM_MAX_CONCURRENCY=1
+LLM_STREAM_MAX_CONCURRENCY=4
 BID_STRUCTURED_OUTPUT_ENABLED=true
+BID_VECTOR_STORE_ENABLED=true
+CHROMA_PERSIST_DIR=.chroma
+CHROMA_COLLECTION=bid_document_chunks
+EMBEDDING_PROVIDER=sentence_transformers
+EMBEDDING_MODEL_ID=BAAI/bge-large-zh-v1.5
+EMBEDDING_API_KEY=
+EMBEDDING_BASE_URL=
+EMBEDDING_BATCH_SIZE=32
+RERANKER_ENABLED=true
+RERANKER_MODEL_ID=BAAI/bge-reranker-v2-m3
+RERANKER_TOP_K_MULTIPLIER=4
 BID_RETRIEVAL_CONTEXT_CHARS=4500
 BID_RETRIEVAL_MAX_CHARS=52000
 
 BID_QUAL_PREFILTER_ENABLED=true
 BID_QUAL_PREFILTER_MODEL_ID=Qwen/Qwen3-8B
-BID_QUAL_PREFILTER_MAX_CHUNKS=48
-BID_QUAL_PREFILTER_CHUNK_CHARS=4500
+BID_QUAL_PREFILTER_RULE_RECALL_ENABLED=true
+BID_QUAL_PREFILTER_RULE_MAX_CHARS=30000
+BID_QUAL_PREFILTER_RULE_CONTEXT_CHARS=3600
+BID_QUAL_PREFILTER_MAX_CHUNKS=24
+BID_QUAL_PREFILTER_CHUNK_CHARS=3600
 BID_QUAL_PREFILTER_BATCH_SIZE=6
 BID_QUAL_PREFILTER_CONCURRENCY=2
 BID_QUAL_PREFILTER_CONFIDENCE=0.45
@@ -513,7 +526,7 @@ BID_RETRIEVAL_MAX_CHARS=52000
 
 流式接口会边分析边返回事件；非流式接口会等待全部分析完成后一次性返回结果。
 
-流式大模型调用默认使用 `LLM_STREAM_MAX_CONCURRENCY=1`，稳定优先。部分 OpenAI-compatible 服务商对多路并发流式请求支持不稳定，可能触发连接中断或 `[Errno 22] Invalid argument`。如需提速，可逐步调到 `2`，不建议直接拉高。
+流式大模型调用默认使用 `LLM_STREAM_MAX_CONCURRENCY=4`，四个专项模块可以并发流式提取。部分 OpenAI-compatible 服务商对多路并发流式请求支持不稳定，若触发连接中断或 `[Errno 22] Invalid argument`，可临时降到 `2` 或 `1`。
 
 ## 前端展示与审查
 
@@ -661,13 +674,12 @@ DELETE /projects/records/{table_name}/{record_id}
 - `bid_analysis_prompts.py`：补充原子粒度输出要求，要求一个要求、材料或评分点尽量单独一行。
 - `extraction_cleaner.py`：对大模型输出做表格行、句子、小点和《材料名称》去重。
 - `bid_database.py`：入库前再次清洗，并在业务表和 `document_chunks` 层做规范化去重。
+- `bid_vector_store.py`：使用 `BAAI/bge-large-zh-v1.5` 生成 Chroma 向量索引，并使用 `BAAI/bge-reranker-v2-m3` 对召回结果重排。
 
 后续可继续增强：
 
-- 接入 embedding 模型做语义粗排，例如 `bge-m3`。
-- 接入 reranker 做候选片段重排，例如 `bge-reranker-v2-m3`。
-- 将五大模块输出从 Markdown 进一步升级为 JSON Schema，再由后端统一渲染为表格和写入 SQLite。
 - 对历史项目做“旧项目重建切片”和“旧项目重新抽取”，把旧数据升级到新粒度。
+- 将 Chroma 向量召回进一步接入专项抽取前的候选片段召回，实现“规则召回 + 向量召回 + reranker”的正式双路召回。
 
 ## 性能说明
 
@@ -696,14 +708,14 @@ DELETE /projects/records/{table_name}/{record_id}
 ```env
 LLM_TIMEOUT=180
 LLM_MAX_CONCURRENCY=2
-LLM_STREAM_MAX_CONCURRENCY=1
+LLM_STREAM_MAX_CONCURRENCY=4
 ```
 
 含义：
 
 - `LLM_MAX_CONCURRENCY=2`：非流式批量提取最多同时跑 2 个模块。
-- `LLM_STREAM_MAX_CONCURRENCY=1`：流式提取按模块排队流式输出，避免 5 路流式连接同时压服务商。
-- 如果服务商稳定且额度充足，可以把 `LLM_MAX_CONCURRENCY` 调到 3；不建议直接调到 5。
+- `LLM_STREAM_MAX_CONCURRENCY=4`：四个专项模块默认并发流式输出。
+- 如果服务商流式并发不稳定，可以把 `LLM_STREAM_MAX_CONCURRENCY` 临时降到 2 或 1；如果额度充足，再结合 `LLM_MAX_CONCURRENCY` 调整非流式并发。
 - 如果仍然失败，优先关闭流式输出，使用非流式稳定提取。
 
 建议使用方式：

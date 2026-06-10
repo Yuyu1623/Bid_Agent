@@ -43,6 +43,15 @@ const projectListHint = document.querySelector("#projectListHint");
 const projectDetailTitle = document.querySelector("#projectDetailTitle");
 const projectDetailHint = document.querySelector("#projectDetailHint");
 const projectSummary = document.querySelector("#projectSummary");
+const projectRagPanel = document.querySelector("#projectRagPanel");
+const projectRagFloatBtn = document.querySelector("#projectRagFloatBtn");
+const projectRagCloseBtn = document.querySelector("#projectRagCloseBtn");
+const projectRagProject = document.querySelector("#projectRagProject");
+const projectRagQuestion = document.querySelector("#projectRagQuestion");
+const projectRagModule = document.querySelector("#projectRagModule");
+const projectRagTopK = document.querySelector("#projectRagTopK");
+const projectRagSearchBtn = document.querySelector("#projectRagSearchBtn");
+const projectRagResults = document.querySelector("#projectRagResults");
 const projectTabs = document.querySelector("#projectTabs");
 const projectTableContent = document.querySelector("#projectTableContent");
 const noticeFields = document.querySelector("#noticeFields");
@@ -258,6 +267,24 @@ const PROJECT_TABLE_COLUMNS = {
   ]
 };
 
+const PROJECT_METADATA_TABLES = [
+  "business_requirements",
+  "technical_requirements",
+  "qualification_requirements",
+  "rejection_items",
+  "scoring_items",
+  "review_findings",
+  "document_sections",
+  "document_chunks"
+];
+
+PROJECT_METADATA_TABLES.forEach((tableName) => {
+  const columns = PROJECT_TABLE_COLUMNS[tableName];
+  if (columns && !columns.some(([key]) => key === "metadata_json")) {
+    columns.push(["metadata_json", "元数据"]);
+  }
+});
+
 const DELETABLE_PROJECT_TABLES = new Set([
   "project_profile",
   "business_requirements",
@@ -300,6 +327,25 @@ knowledgeImportFile?.addEventListener("change", importKnowledgeBase);
 projectRefreshBtn?.addEventListener("click", () => loadProjectsFromBackend());
 projectDeleteBtn?.addEventListener("click", deleteActiveProject);
 projectSearch?.addEventListener("input", () => loadProjectsFromBackend(projectSearch.value.trim()));
+projectRagFloatBtn?.addEventListener("click", () => {
+  if (projectRagFloatBtn.dataset.dragging === "true") {
+    return;
+  }
+  toggleProjectRagPanel(true);
+});
+projectRagCloseBtn?.addEventListener("click", () => toggleProjectRagPanel(false));
+projectRagProject?.addEventListener("change", () => {
+  if (projectRagProject.value && projectRagProject.value !== activeProjectId) {
+    renderProjectRagMessage("已切换检索项目，输入问题后开始检索。");
+  }
+});
+projectRagSearchBtn?.addEventListener("click", runProjectVectorSearch);
+projectRagQuestion?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    runProjectVectorSearch();
+  }
+});
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files[0];
@@ -957,6 +1003,7 @@ async function loadProjectsFromBackend(query = projectSearch?.value?.trim() || "
     const data = await response.json();
     projectStore = data.projects || [];
     renderProjectList();
+    syncProjectRagProjectSelect();
     if (activeProjectId && projectStore.some((item) => item.id === activeProjectId)) {
       await loadProjectDetail(activeProjectId);
     } else if (projectStore.length) {
@@ -971,6 +1018,7 @@ async function loadProjectsFromBackend(query = projectSearch?.value?.trim() || "
   } catch (error) {
     projectStore = [];
     renderProjectList();
+    syncProjectRagProjectSelect();
     renderEmptyProjectDetail(`项目库读取失败：${error.message}`);
     if (projectListHint) {
       projectListHint.textContent = "项目库读取失败，请确认后端已启动。";
@@ -989,17 +1037,13 @@ function renderProjectList() {
   projectList.innerHTML = projectStore
     .map((project) => {
       const active = project.id === activeProjectId ? " active" : "";
-      const meta = [
-        project.projectCode,
-        project.buyerName,
-        `${project.documentCount || 0} 文件`,
-        `${project.chunkCount || 0} 切片`
-      ].filter(Boolean).join(" · ");
+      const code = project.projectCode ? `编号：${project.projectCode}` : "未记录项目编号";
+      const status = project.status || "已入库";
       return `
         <button class="knowledge-item project-item${active}" type="button" data-project-id="${escapeHtml(project.id)}">
-          <strong>${escapeHtml(project.projectName || "未命名项目")}</strong>
-          <span>${escapeHtml(meta || "暂无补充信息")}</span>
-          <small>${escapeHtml(project.status || "待核对")}</small>
+          <span class="project-item-main">${escapeHtml(project.projectName || "未命名项目")}</span>
+          <span class="project-item-sub">${escapeHtml(code)}</span>
+          <span class="project-item-badge">${escapeHtml(status)}</span>
         </button>
       `;
     })
@@ -1046,6 +1090,7 @@ function renderEmptyProjectDetail(message = "选择左侧项目后查看结构�
   if (projectSummary) {
     projectSummary.innerHTML = "";
   }
+  renderProjectRagMessage("选择项目后，可以在这里按问题检索原文证据。");
   if (projectTabs) {
     projectTabs.innerHTML = "";
   }
@@ -1077,6 +1122,264 @@ function renderProjectDetail() {
 
   renderProjectTabs();
   renderProjectTable();
+  syncProjectRagProjectSelect();
+}
+
+function toggleProjectRagPanel(open) {
+  if (!projectRagPanel) {
+    return;
+  }
+  const shouldOpen = open ?? !projectRagPanel.classList.contains("open");
+  projectRagPanel.classList.toggle("open", shouldOpen);
+  projectRagPanel.setAttribute("aria-hidden", shouldOpen ? "false" : "true");
+  if (shouldOpen) {
+    positionProjectRagPanelNearFloat();
+    if (!activeProjectId) {
+      renderProjectRagMessage("请先从左侧选择一个项目。");
+    }
+    setTimeout(() => projectRagQuestion?.focus(), 0);
+  }
+}
+
+function positionProjectRagPanelNearFloat() {
+  if (!projectRagPanel || !projectRagFloatBtn) {
+    return;
+  }
+  const panel = projectRagFloatBtn.closest(".project-detail-panel");
+  const boundary = panel?.getBoundingClientRect() || document.body.getBoundingClientRect();
+  const buttonRect = projectRagFloatBtn.getBoundingClientRect();
+  const panelWidth = Math.min(720, Math.max(320, boundary.width - 44));
+  const panelHeight = Math.min(680, Math.max(260, boundary.height - 120));
+  const rawX = buttonRect.left - boundary.left - panelWidth + buttonRect.width;
+  const rawY = buttonRect.top - boundary.top - panelHeight - 12;
+  const x = clamp(rawX, 14, boundary.width - panelWidth - 14);
+  const y = clamp(rawY, 14, boundary.height - panelHeight - 14);
+  projectRagPanel.style.left = `${x}px`;
+  projectRagPanel.style.top = `${y}px`;
+  projectRagPanel.style.right = "auto";
+  projectRagPanel.style.bottom = "auto";
+  projectRagPanel.style.width = `${panelWidth}px`;
+  projectRagPanel.style.maxHeight = `${panelHeight}px`;
+}
+
+function syncProjectRagProjectSelect() {
+  if (!projectRagProject) {
+    return;
+  }
+  const currentValue = projectRagProject.value || activeProjectId || "";
+  const options = [
+    `<option value="">当前项目${activeProjectId ? "" : "（未选择）"}</option>`,
+    ...projectStore.map((project) => {
+      const label = [
+        project.project_name || "未命名项目",
+        project.project_code || project.projectCode
+      ].filter(Boolean).join(" · ");
+      return `<option value="${escapeHtml(project.id)}">${escapeHtml(label)}</option>`;
+    })
+  ];
+  projectRagProject.innerHTML = options.join("");
+  projectRagProject.value = projectStore.some((project) => project.id === currentValue)
+    ? currentValue
+    : "";
+}
+
+async function runProjectVectorSearch() {
+  const selectedProjectId = projectRagProject?.value || activeProjectId;
+  if (!selectedProjectId) {
+    toggleProjectRagPanel(true);
+    renderProjectRagMessage("请先从左侧选择一个项目。");
+    return;
+  }
+  const query = projectRagQuestion?.value?.trim() || "";
+  if (!query) {
+    renderProjectRagMessage("请输入要检索的问题。");
+    projectRagQuestion?.focus();
+    return;
+  }
+
+  const apiBase = getApiBase();
+  const payload = {
+    query,
+    project_id: selectedProjectId,
+    module: projectRagModule?.value || null,
+    top_k: Number(projectRagTopK?.value || 8)
+  };
+
+  projectRagSearchBtn.disabled = true;
+  renderProjectRagMessage("正在检索 Chroma 向量索引...");
+  try {
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/vector/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+    }
+    renderProjectRagResults(data);
+  } catch (error) {
+    renderProjectRagMessage(`智能检索失败：${error.message}`);
+  } finally {
+    projectRagSearchBtn.disabled = false;
+  }
+}
+
+function renderProjectRagMessage(message) {
+  if (projectRagResults) {
+    projectRagResults.innerHTML = `<div class="project-rag-empty">${escapeHtml(message)}</div>`;
+  }
+}
+
+function renderProjectRagResults(data) {
+  if (!projectRagResults) {
+    return;
+  }
+  if (!data?.enabled) {
+    renderProjectRagMessage(`向量检索未启用：${data?.reason || "请检查 Chroma 和 embedding 配置"}`);
+    return;
+  }
+  const results = data.results || [];
+  if (!results.length) {
+    renderProjectRagMessage("没有检索到相关片段。可以换一个更宽泛的问题，或确认该项目已完成向量索引。");
+    return;
+  }
+  const fallbackNote = data.search_type === "hybrid_lexical_only" || data.search_type === "sqlite_fallback"
+    ? `<div class="project-rag-empty">当前使用混合检索的关键词通道：${escapeHtml(data.reason || "向量通道暂不可用")}</div>`
+    : "";
+  projectRagResults.innerHTML = `${fallbackNote}${results.map(renderProjectRagResultCard).join("")}`;
+}
+
+function renderProjectRagResultCard(item) {
+  const metadata = item.metadata || {};
+  const score = item.rerank_score !== undefined
+    ? `重排分 ${Number(item.rerank_score).toFixed(3)}`
+    : item.distance !== undefined && item.distance !== null
+      ? `距离 ${Number(item.distance).toFixed(3)}`
+      : "";
+  const hybridScore = item.hybrid_score !== undefined ? `混合分 ${Number(item.hybrid_score).toFixed(3)}` : "";
+  const sources = Array.isArray(item.match_sources) && item.match_sources.length
+    ? `命中：${item.match_sources.join("+")}`
+    : "";
+  const metaLine = [
+    metadata.hierarchy_path || metadata.title_path,
+    metadata.module,
+    metadata.item_type || metadata.chunk_type,
+    metadata.page_start ? `第 ${metadata.page_start}${metadata.page_end && metadata.page_end !== metadata.page_start ? `-${metadata.page_end}` : ""} 页` : "",
+    item.chunk_id,
+    sources,
+    hybridScore,
+    score
+  ].filter(Boolean).join(" · ");
+
+  return `
+    <article class="project-rag-card">
+      <div class="project-rag-rank">#${escapeHtml(String(item.rank || ""))}</div>
+      <div class="project-rag-body">
+        <div class="project-rag-meta">${escapeHtml(metaLine || "未记录来源信息")}</div>
+        <pre>${escapeHtml(item.document || "")}</pre>
+        ${renderMetadataCell(metadata)}
+      </div>
+    </article>
+  `;
+}
+
+function initProjectRagFloatDrag() {
+  if (!projectRagFloatBtn) {
+    return;
+  }
+  const saved = loadProjectRagFloatPosition();
+  if (saved) {
+    applyProjectRagFloatPosition(saved.x, saved.y);
+  }
+
+  let state = null;
+  projectRagFloatBtn.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    const rect = projectRagFloatBtn.getBoundingClientRect();
+    state = {
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      moved: false
+    };
+    projectRagFloatBtn.setPointerCapture(event.pointerId);
+  });
+
+  projectRagFloatBtn.addEventListener("pointermove", (event) => {
+    if (!state) {
+      return;
+    }
+    const dx = Math.abs(event.clientX - state.startX);
+    const dy = Math.abs(event.clientY - state.startY);
+    if (dx + dy > 4) {
+      state.moved = true;
+      projectRagFloatBtn.dataset.dragging = "true";
+    }
+    if (!state.moved) {
+      return;
+    }
+    const panel = projectRagFloatBtn.closest(".project-detail-panel");
+    const boundary = panel?.getBoundingClientRect() || document.body.getBoundingClientRect();
+    const size = projectRagFloatBtn.getBoundingClientRect();
+    const x = clamp(event.clientX - boundary.left - state.offsetX, 8, boundary.width - size.width - 8);
+    const y = clamp(event.clientY - boundary.top - state.offsetY, 8, boundary.height - size.height - 8);
+    applyProjectRagFloatPosition(x, y);
+  });
+
+  projectRagFloatBtn.addEventListener("pointerup", (event) => {
+    if (!state) {
+      return;
+    }
+    projectRagFloatBtn.releasePointerCapture(event.pointerId);
+    const moved = state.moved;
+    state = null;
+    if (moved) {
+      const rect = projectRagFloatBtn.getBoundingClientRect();
+      const panel = projectRagFloatBtn.closest(".project-detail-panel");
+      const boundary = panel?.getBoundingClientRect() || document.body.getBoundingClientRect();
+      saveProjectRagFloatPosition(rect.left - boundary.left, rect.top - boundary.top);
+      setTimeout(() => {
+        projectRagFloatBtn.dataset.dragging = "false";
+      }, 0);
+    }
+  });
+
+  projectRagFloatBtn.addEventListener("pointercancel", () => {
+    state = null;
+    projectRagFloatBtn.dataset.dragging = "false";
+  });
+}
+
+function applyProjectRagFloatPosition(x, y) {
+  projectRagFloatBtn.style.left = `${x}px`;
+  projectRagFloatBtn.style.top = `${y}px`;
+  projectRagFloatBtn.style.right = "auto";
+  projectRagFloatBtn.style.bottom = "auto";
+}
+
+function loadProjectRagFloatPosition() {
+  try {
+    const value = JSON.parse(localStorage.getItem("dowell_project_rag_float_position") || "null");
+    return value && Number.isFinite(value.x) && Number.isFinite(value.y) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveProjectRagFloatPosition(x, y) {
+  localStorage.setItem(
+    "dowell_project_rag_float_position",
+    JSON.stringify({ x: Math.round(x), y: Math.round(y) })
+  );
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
 function renderProjectTabs() {
@@ -1135,7 +1438,7 @@ function renderProjectTableRow(row, columns) {
     : "";
   return `
     <tr>
-      ${columns.map(([key]) => `<td title="${escapeHtml(projectCellValue(row[key]))}">${escapeHtml(projectCellValue(row[key]))}</td>`).join("")}
+      ${columns.map(([key]) => projectTableCellHtml(key, row[key])).join("")}
       ${deleteCell}
     </tr>
   `;
@@ -1197,6 +1500,56 @@ function projectCellValue(value) {
   }
   const text = String(value).replace(/\s+/g, " ").trim();
   return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+}
+
+function projectTableCellHtml(key, value) {
+  if (key === "metadata_json") {
+    return `<td class="metadata-td">${renderMetadataCell(value)}</td>`;
+  }
+  return `<td title="${escapeHtml(projectCellValue(value))}">${escapeHtml(projectCellValue(value))}</td>`;
+}
+
+function renderMetadataCell(value) {
+  if (value === null || value === undefined || value === "" || value === "{}") {
+    return `<span class="muted-cell">无元数据</span>`;
+  }
+
+  const parsed = parseMetadataJson(value);
+  const formatted = parsed ? JSON.stringify(parsed, null, 2) : String(value);
+  const summary = metadataSummary(parsed, value);
+
+  return `
+    <details class="metadata-cell">
+      <summary>${escapeHtml(summary)}</summary>
+      <pre>${escapeHtml(formatted)}</pre>
+    </details>
+  `;
+}
+
+function parseMetadataJson(value) {
+  if (value && typeof value === "object") {
+    return value;
+  }
+  try {
+    return JSON.parse(String(value || ""));
+  } catch {
+    return null;
+  }
+}
+
+function metadataSummary(parsed, rawValue) {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const keys = Object.keys(parsed).filter((key) => {
+      const value = parsed[key];
+      return value !== null && value !== undefined && value !== "" && value !== "未提取";
+    });
+    if (keys.length) {
+      const shown = keys.slice(0, 3).join(" / ");
+      return keys.length > 3 ? `${shown} +${keys.length - 3}` : shown;
+    }
+    return "空元数据";
+  }
+  return projectCellValue(rawValue);
 }
 
 function formatProjectValue(value) {
@@ -2303,4 +2656,5 @@ function flashButton(button, text) {
 syncMineruOptions();
 syncDeepThinkingOption();
 syncContentReviewDeepThinkingOption();
+initProjectRagFloatDrag();
 resetView();

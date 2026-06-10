@@ -315,6 +315,41 @@
                 </div>
               </div>
               <div id="projectSummary" class="project-summary"></div>
+              <button id="projectRagFloatBtn" class="project-rag-float-btn" type="button" title="智能检索">检索</button>
+              <section id="projectRagPanel" class="project-rag-panel floating">
+                <div class="project-rag-head">
+                  <div>
+                    <h4>智能检索</h4>
+                    <p>基于当前项目的语义切片和 Chroma 向量索引，按问题召回原文证据。</p>
+                  </div>
+                  <div class="project-rag-actions">
+                    <button id="projectRagSearchBtn" class="ghost-btn" type="button">检索</button>
+                    <button id="projectRagCloseBtn" class="ghost-btn" type="button">关闭</button>
+                  </div>
+                </div>
+                <div class="project-rag-controls">
+                  <select id="projectRagProject" title="选择检索项目">
+                    <option value="">当前项目</option>
+                  </select>
+                  <input id="projectRagQuestion" type="search" placeholder="例如：这个项目有哪些废标风险？付款条件是什么？技术方案需要响应哪些点？" />
+                  <select id="projectRagModule" title="模块过滤">
+                    <option value="">全部模块</option>
+                    <option value="project_overview">项目概况</option>
+                    <option value="business_content">商务内容</option>
+                    <option value="technical_requirements">技术要求</option>
+                    <option value="qualification_compliance">资格审查 / 废标项</option>
+                    <option value="scoring">评分要求</option>
+                  </select>
+                  <select id="projectRagTopK" title="召回数量">
+                    <option value="5">Top 5</option>
+                    <option value="8" selected>Top 8</option>
+                    <option value="12">Top 12</option>
+                  </select>
+                </div>
+                <div id="projectRagResults" class="project-rag-results">
+                  选择项目后，可以在这里按问题检索原文证据。
+                </div>
+              </section>
               <div id="projectTabs" class="module-tabs project-tabs"></div>
               <div id="projectTableContent" class="project-table-content"></div>
             </section>

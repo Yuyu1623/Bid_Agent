@@ -556,6 +556,7 @@ def health() -> dict:
             "global_context_first_pass": True,
             "hybrid_retrieval_query_rerank": True,
             "qualification_rejection_prefilter": True,
+            "chroma_vector_store": True,
         },
         "backend_file": __file__,
         "backend_dir": str(Path(__file__).resolve().parent),
@@ -611,6 +612,14 @@ class ContentReviewRequest(BaseModel):
 class ContentReviewResponse(BaseModel):
     content_review_markdown: str = ""
     content_review_report: dict = Field(default_factory=dict)
+
+
+class VectorSearchRequest(BaseModel):
+    query: str
+    project_id: Optional[str] = None
+    module: Optional[str] = None
+    item_type: Optional[str] = None
+    top_k: int = Field(default=8, ge=1, le=50)
 
 
 class KnowledgeEntryRequest(BaseModel):
@@ -684,6 +693,22 @@ def get_project(project_id: str) -> dict:
     return detail
 
 
+@app.post("/vector/search")
+def vector_search(request: VectorSearchRequest) -> dict:
+    try:
+        from bid_vector_store import search_project_chunks
+
+        return search_project_chunks(
+            request.query,
+            project_id=request.project_id,
+            module=request.module,
+            item_type=request.item_type,
+            top_k=request.top_k,
+        )
+    except Exception as exc:
+        _raise_api_error(exc)
+
+
 @app.post("/projects/records/{table_name}/{record_id}/confirm")
 def confirm_project_record(table_name: str, record_id: str, request: ConfirmRecordRequest) -> dict:
     try:
@@ -697,6 +722,12 @@ def confirm_project_record(table_name: str, record_id: str, request: ConfirmReco
 def remove_project(project_id: str) -> dict:
     try:
         result = delete_project(project_id)
+        try:
+            from bid_vector_store import delete_project_vectors
+
+            result["vector_delete"] = delete_project_vectors(project_id)
+        except Exception as vector_exc:
+            result["vector_delete"] = {"enabled": False, "deleted": False, "reason": str(vector_exc)}
     except Exception as exc:
         _raise_api_error(exc)
     return result
@@ -1168,7 +1199,7 @@ async def upload_and_analyze_document_stream(
                     qualification_prefilter_sections=qualification_prefilter_hits,
                 )
 
-                stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "1")))
+                stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "4")))
                 stream_semaphore = asyncio.Semaphore(stream_concurrency)
                 yield _stream_event(
                     "status",
@@ -1383,7 +1414,7 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
                 global_context=global_context,
                 qualification_prefilter_sections=qualification_prefilter_hits,
             )
-            stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "1")))
+            stream_concurrency = max(1, int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "4")))
             stream_semaphore = asyncio.Semaphore(stream_concurrency)
             yield _stream_event(
                 "status",

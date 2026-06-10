@@ -9,6 +9,7 @@ import re
 from typing import Any, Iterable, Sequence
 
 from bid_document_parser import BidDocumentSection
+from bid_section_retriever import retrieve_sections_for_module
 from llm_client import LLM_Invoke
 
 
@@ -58,11 +59,12 @@ def build_qualification_prefilter_chunks(
     max_chunks: int | None = None,
     chunk_chars: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Split sections into coarse chunks for lightweight pre-screening."""
+    """Rule-recall likely sections, then split them for lightweight review."""
     max_chunks = max_chunks or int(os.getenv("BID_QUAL_PREFILTER_MAX_CHUNKS", "48"))
     chunk_chars = chunk_chars or int(os.getenv("BID_QUAL_PREFILTER_CHUNK_CHARS", "4500"))
+    candidate_sections = _rule_recall_qualification_sections(sections)
     chunks: list[dict[str, Any]] = []
-    for section in sections:
+    for section in candidate_sections:
         text = _section_text(section)
         if not text:
             continue
@@ -81,6 +83,29 @@ def build_qualification_prefilter_chunks(
             if len(chunks) >= max_chunks:
                 return chunks
     return chunks
+
+
+def _rule_recall_qualification_sections(
+    sections: Sequence[BidDocumentSection],
+) -> list[BidDocumentSection]:
+    if os.getenv("BID_QUAL_PREFILTER_RULE_RECALL_ENABLED", "true").lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return list(sections)
+
+    max_chars = int(os.getenv("BID_QUAL_PREFILTER_RULE_MAX_CHARS", "30000"))
+    context_chars = int(os.getenv("BID_QUAL_PREFILTER_RULE_CONTEXT_CHARS", "3600"))
+    recalled = retrieve_sections_for_module(
+        "qualification_compliance",
+        sections,
+        context_chars=context_chars,
+        max_chars=max_chars,
+        neighbor_sections=1,
+    )
+    return recalled or list(sections)
 
 
 async def prefilter_qualification_sections(
