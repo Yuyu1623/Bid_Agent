@@ -12,9 +12,18 @@ const stepKicker = document.querySelector("#stepKicker");
 const stepTitle = document.querySelector("#stepTitle");
 const contentCard = document.querySelector(".content-card");
 const generationTopPanel = document.querySelector("#generationTopPanel");
+const bidGenerationWorkspace = document.querySelector("#bidGenerationWorkspace");
+const generationProjectHint = document.querySelector("#generationProjectHint");
+const generationProjectSelect = document.querySelector("#generationProjectSelect");
+const generationOutlineBtn = document.querySelector("#generationOutlineBtn");
+const generationOutlineCopyBtn = document.querySelector("#generationOutlineCopyBtn");
+const generationOutlineExportBtn = document.querySelector("#generationOutlineExportBtn");
+const generationEvidenceOutput = document.querySelector("#generationEvidenceOutput");
+const generationOutlineEditor = document.querySelector("#generationOutlineEditor");
 const knowledgeWorkspace = document.querySelector("#knowledgeWorkspace");
 const projectWorkspace = document.querySelector("#projectWorkspace");
 const toolNavButtons = document.querySelectorAll("[data-tool-view]");
+const bidGenerationNavButton = document.querySelector('[data-tool-view="businessBid"]');
 const knowledgeTypes = document.querySelector("#knowledgeTypes");
 const knowledgeTypeTitle = document.querySelector("#knowledgeTypeTitle");
 const knowledgeTypeDesc = document.querySelector("#knowledgeTypeDesc");
@@ -43,6 +52,13 @@ const projectListHint = document.querySelector("#projectListHint");
 const projectDetailTitle = document.querySelector("#projectDetailTitle");
 const projectDetailHint = document.querySelector("#projectDetailHint");
 const projectSummary = document.querySelector("#projectSummary");
+const projectOutlinePanel = document.querySelector("#projectOutlinePanel");
+const projectOutlineFloatBtn = document.querySelector("#projectOutlineFloatBtn");
+const projectOutlineCloseBtn = document.querySelector("#projectOutlineCloseBtn");
+const projectOutlineGenerateBtn = document.querySelector("#projectOutlineGenerateBtn");
+const projectOutlineCopyBtn = document.querySelector("#projectOutlineCopyBtn");
+const projectOutlineExportBtn = document.querySelector("#projectOutlineExportBtn");
+const projectOutlineOutput = document.querySelector("#projectOutlineOutput");
 const projectRagPanel = document.querySelector("#projectRagPanel");
 const projectRagFloatBtn = document.querySelector("#projectRagFloatBtn");
 const projectRagCloseBtn = document.querySelector("#projectRagCloseBtn");
@@ -87,6 +103,7 @@ let projectStore = [];
 let activeProjectId = null;
 let activeProjectDetail = null;
 let activeProjectTable = "project_profile";
+let lastSavedProjectId = null;
 
 const KNOWLEDGE_STORAGE_KEY = "dowell_bid_knowledge_base_v1";
 
@@ -149,7 +166,6 @@ const PARSE_METHOD_LABELS = {
   mineru_pipeline: "MinerU Pipeline 模型",
   mineru_html: "MinerU-HTML 模型",
   mineru_parallel_pages: "MinerU 并行页段",
-  mineru_local_pipeline: "本地 MinerU Pipeline",
   pymupdf4llm: "PyMuPDF4LLM 快速 PDF",
   docling: "Docling 结构化 PDF",
   pdfplumber: "本地 pdfplumber PDF",
@@ -324,9 +340,27 @@ knowledgeSearch?.addEventListener("input", renderKnowledgeList);
 knowledgeExportBtn?.addEventListener("click", exportKnowledgeBase);
 knowledgeImportBtn?.addEventListener("click", () => knowledgeImportFile?.click());
 knowledgeImportFile?.addEventListener("change", importKnowledgeBase);
+generationOutlineBtn?.addEventListener("click", generateWorkbenchBidOutline);
+generationOutlineCopyBtn?.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(getGenerationOutlineText());
+  flashButton(generationOutlineCopyBtn, "已复制");
+});
+generationOutlineExportBtn?.addEventListener("click", () => {
+  exportText("标书目录建议.md", getGenerationOutlineText());
+});
 projectRefreshBtn?.addEventListener("click", () => loadProjectsFromBackend());
 projectDeleteBtn?.addEventListener("click", deleteActiveProject);
 projectSearch?.addEventListener("input", () => loadProjectsFromBackend(projectSearch.value.trim()));
+projectOutlineFloatBtn?.addEventListener("click", () => toggleProjectOutlinePanel(true));
+projectOutlineCloseBtn?.addEventListener("click", () => toggleProjectOutlinePanel(false));
+projectOutlineGenerateBtn?.addEventListener("click", generateProjectBidOutline);
+projectOutlineCopyBtn?.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(projectOutlineOutput?.dataset.rawText || projectOutlineOutput?.textContent || "");
+  flashButton(projectOutlineCopyBtn, "已复制");
+});
+projectOutlineExportBtn?.addEventListener("click", () => {
+  exportText("标书目录建议.md", projectOutlineOutput?.dataset.rawText || projectOutlineOutput?.textContent || "");
+});
 projectRagFloatBtn?.addEventListener("click", () => {
   if (projectRagFloatBtn.dataset.dragging === "true") {
     return;
@@ -369,7 +403,7 @@ reviewDoneBtn.addEventListener("click", () => {
     return;
   }
   setWorkflowStep(3);
-  activateTab("parsed");
+  syncGenerationProjectSelect();
   statusText.textContent = "核对完成，已进入标书生成步骤";
 });
 
@@ -947,7 +981,24 @@ function setWorkflowStep(step) {
   });
   reviewDoneBtn.classList.toggle("visible", step === 2);
   submitBtn.classList.toggle("hidden", step !== 1);
-  generationTopPanel.classList.toggle("visible", step === 3 && activeToolView === "parse");
+  form.classList.toggle("hidden", step === 3 && activeToolView === "parse");
+  contentCard.classList.toggle("hidden", step === 3 && activeToolView === "parse");
+  generationTopPanel.classList.toggle("visible", false);
+  bidGenerationWorkspace?.classList.toggle("hidden", !(step === 3 && activeToolView === "parse"));
+  if (step === 3 && activeToolView === "parse") {
+    syncGenerationProjectSelect();
+  }
+}
+
+function normalizeGenerationNavText() {
+  const strong = bidGenerationNavButton?.querySelector("strong");
+  const small = bidGenerationNavButton?.querySelector("small");
+  if (strong) {
+    strong.textContent = "标书生成";
+  }
+  if (small) {
+    small.textContent = "目录、章节正文与导出";
+  }
 }
 
 async function setActiveToolView(view) {
@@ -958,13 +1009,16 @@ async function setActiveToolView(view) {
 
   const showKnowledge = view === "knowledge";
   const showProjects = view === "projects";
-  const showDataWorkspace = showKnowledge || showProjects;
+  const showGeneration = view === "businessBid";
+  const showDataWorkspace = showKnowledge || showProjects || showGeneration;
   document.querySelector(".workspace").classList.toggle("knowledge-mode", showDataWorkspace);
-  form.classList.toggle("hidden", showDataWorkspace);
-  generationTopPanel.classList.toggle("hidden", showDataWorkspace);
-  contentCard.classList.toggle("hidden", showDataWorkspace);
+  const currentStep = Number(document.querySelector(".flow-step.active")?.dataset.flowStep || 1);
+  form.classList.toggle("hidden", showDataWorkspace || (view === "parse" && currentStep === 3));
+  generationTopPanel.classList.toggle("hidden", true);
+  contentCard.classList.toggle("hidden", showDataWorkspace || (view === "parse" && currentStep === 3));
   knowledgeWorkspace.classList.toggle("hidden", !showKnowledge);
   projectWorkspace?.classList.toggle("hidden", !showProjects);
+  bidGenerationWorkspace?.classList.toggle("hidden", !(showGeneration || (view === "parse" && currentStep === 3)));
 
   if (showKnowledge) {
     await loadKnowledgeFromBackend();
@@ -978,6 +1032,11 @@ async function setActiveToolView(view) {
     if (!activeProjectId) {
       renderEmptyProjectDetail();
     }
+  } else if (showGeneration) {
+    if (!projectStore.length) {
+      await loadProjectsFromBackend();
+    }
+    syncGenerationProjectSelect();
   } else if (view !== "parse") {
     statusText.textContent = "该模块已预留入口，当前请先使用招标解析和知识库。";
   } else {
@@ -1004,6 +1063,7 @@ async function loadProjectsFromBackend(query = projectSearch?.value?.trim() || "
     projectStore = data.projects || [];
     renderProjectList();
     syncProjectRagProjectSelect();
+    syncGenerationProjectSelect();
     if (activeProjectId && projectStore.some((item) => item.id === activeProjectId)) {
       await loadProjectDetail(activeProjectId);
     } else if (projectStore.length) {
@@ -1019,6 +1079,7 @@ async function loadProjectsFromBackend(query = projectSearch?.value?.trim() || "
     projectStore = [];
     renderProjectList();
     syncProjectRagProjectSelect();
+    syncGenerationProjectSelect();
     renderEmptyProjectDetail(`项目库读取失败：${error.message}`);
     if (projectListHint) {
       projectListHint.textContent = "项目库读取失败，请确认后端已启动。";
@@ -1125,6 +1186,395 @@ function renderProjectDetail() {
   syncProjectRagProjectSelect();
 }
 
+function toggleProjectOutlinePanel(open) {
+  if (!projectOutlinePanel) {
+    return;
+  }
+  const shouldOpen = open ?? !projectOutlinePanel.classList.contains("open");
+  projectOutlinePanel.classList.toggle("open", shouldOpen);
+  projectOutlinePanel.setAttribute("aria-hidden", shouldOpen ? "false" : "true");
+  if (shouldOpen) {
+    positionFloatingPanelNearButton(projectOutlinePanel, projectOutlineFloatBtn, 760, 680);
+    if (!activeProjectId) {
+      renderProjectOutlineMessage("请先从左侧选择一个项目。");
+    }
+  }
+}
+
+async function generateProjectBidOutline() {
+  if (!activeProjectId) {
+    toggleProjectOutlinePanel(true);
+    renderProjectOutlineMessage("请先从左侧选择一个项目。");
+    return;
+  }
+  const apiBase = getApiBase();
+  projectOutlineGenerateBtn.disabled = true;
+  renderProjectOutlineMessage("正在生成标书目录建议...");
+  try {
+    await ensureBackendReady(apiBase);
+    let data;
+    try {
+      data = await fetchProjectBidOutline(apiBase, activeProjectId);
+    } catch (error) {
+      if (!activeProjectDetail) {
+        throw error;
+      }
+      data = {
+        outline_markdown: buildLocalBidOutline(activeProjectDetail),
+        local_fallback: true
+      };
+    }
+    const markdown = data.outline_markdown || "暂无目录结果";
+    projectOutlineOutput.dataset.rawText = markdown;
+    projectOutlineOutput.innerHTML = renderSimpleMarkdown(markdown);
+  } catch (error) {
+    renderProjectOutlineMessage(`标书目录生成失败：${error.message}`);
+  } finally {
+    projectOutlineGenerateBtn.disabled = false;
+  }
+}
+
+async function generateWorkbenchBidOutline() {
+  const selectedProjectId = generationProjectSelect?.value || lastSavedProjectId || activeProjectId;
+  if (!selectedProjectId) {
+    renderGenerationOutlineMessage("请先完成一次招标解析，或在项目库中选择一个项目。");
+    return;
+  }
+  const apiBase = getApiBase();
+  generationOutlineBtn.disabled = true;
+  renderGenerationOutlineMessage("正在生成标书目录建议...");
+  try {
+    await ensureBackendReady(apiBase);
+    let data;
+    try {
+      data = await fetchProjectBidOutline(apiBase, selectedProjectId);
+    } catch (error) {
+      const detail = await loadProjectDetailForGeneration(selectedProjectId);
+      data = {
+        outline_markdown: buildLocalBidOutline(detail),
+        local_fallback: true
+      };
+    }
+    const markdown = data.outline_markdown || "暂无目录结果";
+    renderGenerationOutlineDraft(markdown);
+    generationProjectHint.textContent = data.local_fallback
+      ? "已使用当前项目库数据生成目录。"
+      : "已根据后端项目数据生成目录。";
+  } catch (error) {
+    renderGenerationOutlineMessage(`标书目录生成失败：${error.message}`);
+  } finally {
+    generationOutlineBtn.disabled = false;
+  }
+}
+
+async function loadProjectDetailForGeneration(projectId) {
+  if (activeProjectDetail?.project?.id === projectId) {
+    return activeProjectDetail;
+  }
+  const apiBase = getApiBase();
+  const response = await fetch(`${apiBase}/projects/${encodeURIComponent(projectId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+  }
+  return data;
+}
+
+function renderGenerationOutlineMessage(message) {
+  if (generationEvidenceOutput) {
+    generationEvidenceOutput.innerHTML = `<div class="project-rag-empty">${escapeHtml(message)}</div>`;
+  }
+  if (generationOutlineEditor && !generationOutlineEditor.value.trim()) {
+    generationOutlineEditor.placeholder = message;
+  }
+}
+
+function renderGenerationOutlineDraft(markdown) {
+  const parts = splitOutlineEvidence(markdown);
+  if (generationEvidenceOutput) {
+    generationEvidenceOutput.dataset.rawText = parts.evidence;
+    generationEvidenceOutput.innerHTML = renderSimpleMarkdown(parts.evidence || "暂无生成依据。");
+  }
+  if (generationOutlineEditor) {
+    generationOutlineEditor.value = parts.outline || "";
+    generationOutlineEditor.dataset.rawText = parts.outline || "";
+  }
+}
+
+function splitOutlineEvidence(markdown) {
+  const text = String(markdown || "").trim();
+  if (!text) {
+    return { evidence: "", outline: "" };
+  }
+  const lines = text.split(/\r?\n/);
+  const firstMainIndex = lines.findIndex((line) => /^##\s+[一二三四五六七八九十]+[、.]/.test(line.trim()));
+  if (firstMainIndex >= 0) {
+    return {
+      evidence: lines.slice(0, firstMainIndex).join("\n").trim(),
+      outline: lines.slice(firstMainIndex).join("\n").trim()
+    };
+  }
+  const basisIndex = lines.findIndex((line) => /^##\s*生成依据/.test(line.trim()));
+  const nextHeadingIndex = basisIndex >= 0
+    ? lines.findIndex((line, index) => index > basisIndex && /^##\s+/.test(line.trim()))
+    : -1;
+  if (basisIndex >= 0 && nextHeadingIndex > basisIndex) {
+    return {
+      evidence: lines.slice(0, nextHeadingIndex).join("\n").trim(),
+      outline: lines.slice(nextHeadingIndex).join("\n").trim()
+    };
+  }
+  return { evidence: "", outline: text };
+}
+
+function getGenerationOutlineText() {
+  return generationOutlineEditor?.value || generationOutlineEditor?.dataset.rawText || "";
+}
+
+function syncGenerationProjectSelect() {
+  if (!generationProjectSelect) {
+    return;
+  }
+  const current = generationProjectSelect.value || lastSavedProjectId || activeProjectId || "";
+  const knownProjects = [...projectStore];
+  const hasLastSaved = lastSavedProjectId && !knownProjects.some((project) => project.id === lastSavedProjectId);
+  if (hasLastSaved) {
+    knownProjects.unshift({
+      id: lastSavedProjectId,
+      projectName: lastAnalysisResult?.database_save?.project_name || "当前解析项目",
+      projectCode: ""
+    });
+  }
+  generationProjectSelect.innerHTML = [
+    `<option value="">当前解析项目</option>`,
+    ...knownProjects.map((project) => {
+      const label = [project.projectName || project.project_name || "未命名项目", project.projectCode || project.project_code]
+        .filter(Boolean)
+        .join(" · ");
+      return `<option value="${escapeHtml(project.id)}">${escapeHtml(label)}</option>`;
+    })
+  ].join("");
+  generationProjectSelect.value = knownProjects.some((project) => project.id === current) ? current : "";
+  const selected = generationProjectSelect.value || lastSavedProjectId || activeProjectId;
+  generationProjectHint.textContent = selected
+    ? "已选择项目，可直接生成标书目录。"
+    : "完成招标解析后，将自动带入当前项目。";
+}
+
+async function fetchProjectBidOutline(apiBase, projectId) {
+  const encodedProjectId = encodeURIComponent(projectId);
+  const urls = [
+    `${apiBase}/projects/bid-outline/${encodedProjectId}`,
+    `${apiBase}/projects/${encodedProjectId}/bid-outline`
+  ];
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const response = await fetch(url);
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      if (response.ok) {
+        return data;
+      }
+      lastError = new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("标书目录接口不可用");
+}
+
+function buildLocalBidOutline(detail) {
+  const project = detail?.project || {};
+  const tables = detail?.tables || {};
+  const profile = firstProjectTableRow(tables, "project_profile");
+  const qualification = projectTableRows(tables, "qualification_requirements");
+  const rejection = projectTableRows(tables, "rejection_items");
+  const business = projectTableRows(tables, "business_requirements");
+  const technical = projectTableRows(tables, "technical_requirements");
+  const scoring = projectTableRows(tables, "scoring_items");
+  const chunks = projectTableRows(tables, "document_chunks");
+  const businessScoring = scoring.filter((row) => String(row.score_type || row.source_heading || "").includes("商务"));
+  const technicalScoring = scoring.filter((row) => String(row.score_type || row.source_heading || "").includes("技术"));
+  const writingHits = localWritingRequirementHits(chunks);
+  const projectName = project.project_name || profile.project_name || "未命名项目";
+  const projectCode = project.project_code || profile.project_code || "未提取";
+
+  const lines = [
+    `# ${projectName} 投标文件目录建议`,
+    "",
+    "## 生成依据",
+    `- 项目编号：${projectCode}`,
+    `- 是否暗标：${localYesNo(profile.is_blind_bid)}`,
+    `- 是否专门面向中小微企业：${localYesNo(profile.is_sme_reserved)}`,
+    `- 已识别资格要求：${qualification.length} 条`,
+    `- 已识别废标/否决项：${rejection.length} 条`,
+    `- 已识别商务要求：${business.length} 条`,
+    `- 已识别技术要求：${technical.length} 条`,
+    `- 已识别评分项：${scoring.length} 条`,
+    "",
+  ];
+
+  if (writingHits.length) {
+    lines.push("## 招标文件中的编制 / 递交要求线索", "");
+    writingHits.slice(0, 8).forEach((item) => lines.push(`- ${shortProjectText(item, 220)}`));
+    lines.push("");
+  }
+
+  lines.push(
+    "## 一、投标文件总目录",
+    "",
+    "### 第一册 商务文件",
+    "1. 投标函",
+    "2. 开标一览表 / 报价表",
+    "3. 法定代表人身份证明",
+    "4. 法定代表人授权委托书",
+    "5. 投标保证金或保证金承诺材料",
+    "6. 资格证明文件",
+    "7. 商务条款响应表",
+    "8. 商务偏离表",
+    "9. 合同条款响应及服务承诺",
+    "",
+    "### 第二册 技术文件",
+    "1. 项目理解与需求分析",
+    "2. 总体技术方案",
+    "3. 技术要求响应表",
+    "4. 项目实施方案",
+    "5. 项目进度计划与交付安排",
+    "6. 质量保障方案",
+    "7. 验收方案",
+    "8. 售后服务与运维保障方案",
+    "9. 技术偏离表",
+    "",
+    "### 第三册 评分响应文件",
+    "1. 商务评分响应索引表",
+    "2. 技术评分响应索引表",
+    "3. 评分证明材料索引",
+    "",
+    "### 第四册 附件材料",
+    "1. 企业资质与证照附件",
+    "2. 人员证书和履历附件",
+    "3. 历史业绩证明附件",
+    "4. 财务、纳税、社保及信用证明附件",
+    "5. 其他招标文件要求的附件",
+    "",
+  );
+
+  appendOutlineItems(lines, "## 二、资格证明文件建议目录", qualification, (row) =>
+    row.required_materials || row.requirement_text || "资格材料"
+  );
+  appendGroupedOutline(lines, "## 三、商务响应建议目录", business, "requirement_type", (row) =>
+    row.item_name || row.requirement_text || "商务响应项"
+  );
+  appendGroupedOutline(lines, "## 四、技术文件建议目录", technical, "requirement_group", (row) =>
+    row.item_name || row.parameter_name || row.requirement_text || "技术响应项"
+  );
+  appendOutlineItems(lines, "## 五、商务评分响应索引", businessScoring, (row) =>
+    `${row.item_name || "商务评分项"} ${row.score_text || ""}`
+  );
+  appendOutlineItems(lines, "## 六、技术评分响应索引", technicalScoring, (row) =>
+    `${row.item_name || "技术评分项"} ${row.score_text || ""}`
+  );
+  appendOutlineItems(lines, "## 七、废标 / 否决风险对应目录提醒", rejection, (row) =>
+    row.rejection_item || row.specific_behavior || "废标风险项"
+  );
+
+  if (localYesNo(profile.is_blind_bid) === "是") {
+    lines.push(
+      "## 八、暗标编制特别提醒",
+      "",
+      "- 技术文件目录和正文应避免出现投标人名称、人员身份、企业标识、过往项目中可识别单位的信息。",
+      "- 商务文件与技术文件建议分册管理，暗标部分单独复核。",
+      ""
+    );
+  }
+
+  return lines.join("\n").trim() + "\n";
+}
+
+function appendOutlineItems(lines, title, rows, pickTitle) {
+  if (!rows.length) {
+    return;
+  }
+  lines.push(title, "");
+  rows.slice(0, 30).forEach((row, index) => {
+    lines.push(`${index + 1}. ${shortProjectText(pickTitle(row), 90)}`);
+  });
+  lines.push("");
+}
+
+function appendGroupedOutline(lines, title, rows, groupKey, pickTitle) {
+  if (!rows.length) {
+    return;
+  }
+  lines.push(title, "");
+  const groups = rows.reduce((map, row) => {
+    const group = String(row[groupKey] || "其他").trim() || "其他";
+    map[group] = map[group] || [];
+    map[group].push(row);
+    return map;
+  }, {});
+  Object.entries(groups).forEach(([group, items]) => {
+    lines.push(`### ${group}`);
+    items.slice(0, 12).forEach((row, index) => {
+      lines.push(`${index + 1}. ${shortProjectText(pickTitle(row), 80)}`);
+    });
+    lines.push("");
+  });
+}
+
+function projectTableRows(tables, tableName) {
+  const rows = tables?.[tableName]?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+function firstProjectTableRow(tables, tableName) {
+  return projectTableRows(tables, tableName)[0] || {};
+}
+
+function localWritingRequirementHits(chunks) {
+  const pattern = /投标文件.*(组成|编制|格式|目录|装订|签署|盖章|密封|递交)|(商务文件|技术文件|资格证明文件|响应文件).*(组成|编制|格式|目录|要求)|暗标|盲评|技术标.*不得|不得出现.*投标人|偏离表|响应表/;
+  const seen = new Set();
+  const hits = [];
+  chunks.forEach((chunk) => {
+    const text = [chunk.title_path, chunk.content, chunk.source_text].filter(Boolean).join(" ");
+    if (!pattern.test(text)) {
+      return;
+    }
+    const content = shortProjectText(chunk.content || chunk.source_text || "", 260);
+    const key = content.replace(/\s+/g, "").slice(0, 120);
+    if (!key || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    hits.push(content);
+  });
+  return hits;
+}
+
+function shortProjectText(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function localYesNo(value) {
+  if (value === 1 || value === "1" || value === true || value === "是") {
+    return "是";
+  }
+  if (value === 0 || value === "0" || value === false || value === "否") {
+    return "否";
+  }
+  return "未提取";
+}
+
+function renderProjectOutlineMessage(message) {
+  if (!projectOutlineOutput) {
+    return;
+  }
+  projectOutlineOutput.dataset.rawText = message;
+  projectOutlineOutput.innerHTML = `<div class="project-rag-empty">${escapeHtml(message)}</div>`;
+}
+
 function toggleProjectRagPanel(open) {
   if (!projectRagPanel) {
     return;
@@ -1142,24 +1592,28 @@ function toggleProjectRagPanel(open) {
 }
 
 function positionProjectRagPanelNearFloat() {
-  if (!projectRagPanel || !projectRagFloatBtn) {
+  positionFloatingPanelNearButton(projectRagPanel, projectRagFloatBtn, 720, 680);
+}
+
+function positionFloatingPanelNearButton(panelElement, buttonElement, preferredWidth, preferredHeight) {
+  if (!panelElement || !buttonElement) {
     return;
   }
-  const panel = projectRagFloatBtn.closest(".project-detail-panel");
+  const panel = buttonElement.closest(".project-detail-panel");
   const boundary = panel?.getBoundingClientRect() || document.body.getBoundingClientRect();
-  const buttonRect = projectRagFloatBtn.getBoundingClientRect();
-  const panelWidth = Math.min(720, Math.max(320, boundary.width - 44));
-  const panelHeight = Math.min(680, Math.max(260, boundary.height - 120));
+  const buttonRect = buttonElement.getBoundingClientRect();
+  const panelWidth = Math.min(preferredWidth, Math.max(320, boundary.width - 44));
+  const panelHeight = Math.min(preferredHeight, Math.max(260, boundary.height - 120));
   const rawX = buttonRect.left - boundary.left - panelWidth + buttonRect.width;
   const rawY = buttonRect.top - boundary.top - panelHeight - 12;
   const x = clamp(rawX, 14, boundary.width - panelWidth - 14);
   const y = clamp(rawY, 14, boundary.height - panelHeight - 14);
-  projectRagPanel.style.left = `${x}px`;
-  projectRagPanel.style.top = `${y}px`;
-  projectRagPanel.style.right = "auto";
-  projectRagPanel.style.bottom = "auto";
-  projectRagPanel.style.width = `${panelWidth}px`;
-  projectRagPanel.style.maxHeight = `${panelHeight}px`;
+  panelElement.style.left = `${x}px`;
+  panelElement.style.top = `${y}px`;
+  panelElement.style.right = "auto";
+  panelElement.style.bottom = "auto";
+  panelElement.style.width = `${panelWidth}px`;
+  panelElement.style.maxHeight = `${panelHeight}px`;
 }
 
 function syncProjectRagProjectSelect() {
@@ -2018,9 +2472,6 @@ function getMineruModelVersion(selectedParseMethod) {
   if (selectedParseMethod === "mineru_pipeline") {
     return "pipeline";
   }
-  if (selectedParseMethod === "mineru_local_pipeline") {
-    return "pipeline";
-  }
   if (selectedParseMethod === "mineru_html") {
     return "MinerU-HTML";
   }
@@ -2031,8 +2482,7 @@ function syncMineruOptions() {
   const supportsOptions =
     parseMethod.value === "mineru_vlm" ||
     parseMethod.value === "mineru_pipeline" ||
-    parseMethod.value === "mineru_parallel_pages" ||
-    parseMethod.value === "mineru_local_pipeline";
+    parseMethod.value === "mineru_parallel_pages";
   enableFormula.disabled = !supportsOptions;
   enableTable.disabled = !supportsOptions;
   enableFormula.closest(".check-item").classList.toggle("disabled", !supportsOptions);
@@ -2099,20 +2549,230 @@ function setLoading(isLoading) {
 
 function setOutputs(data) {
   lastAnalysisResult = { ...(data || {}) };
+  if (data?.database_save?.project_id) {
+    lastSavedProjectId = data.database_save.project_id;
+    activeProjectId = lastSavedProjectId;
+  }
   if (Array.isArray(data.sections)) {
     lastParsedSections = data.sections;
   }
+  const businessMarkdown = normalizeDisplayField(data, "business_content");
+  const technicalMarkdown = normalizeDisplayField(data, "technical_scoring_requirements", {
+    aliases: ["technical_requirements"]
+  });
+  const qualificationMarkdown = normalizeDisplayField(data, "qualification_compliance_requirements");
+  const scoringMarkdown = normalizeDisplayField(data, "price_scoring_requirements", {
+    aliases: ["scoring_requirements"]
+  });
   renderNotice(data.project_overview || "");
-  renderBusinessContent(data.business_content || "");
-  renderTechnicalContent(data.technical_requirements || data.technical_scoring_requirements || "暂无结果");
-  renderQualification(data.qualification_compliance_requirements || "");
-  renderScoring(data.scoring_requirements || data.price_scoring_requirements || "");
+  renderBusinessContent(businessMarkdown || "");
+  renderTechnicalContent(technicalMarkdown || "暂无结果");
+  renderQualification(qualificationMarkdown || "");
+  renderScoring(scoringMarkdown || "");
   setImageAnalysisDisplay(data.image_analysis_markdown || "未提取到图片。", data.image_analysis_items || []);
   renderContentReviewContent(data.content_review_markdown || data.content_review_report?.markdown || "内容审查尚未执行。五大模块提取完成后，可点击“执行审查”。");
   renderParseQuality(data.parse_quality || null);
   if (data.parse_method_used) {
     fileName.textContent = `实际解析方案：${PARSE_METHOD_LABELS[data.parse_method_used] || data.parse_method_used}`;
   }
+  syncGenerationProjectSelect();
+}
+
+function normalizeDisplayField(data, field, options = {}) {
+  const aliases = options.aliases || [];
+  const directKeys = [field, ...aliases];
+  for (const key of directKeys) {
+    const markdown = valueToDisplayMarkdown(field, data?.[key]);
+    if (markdown) {
+      return markdown;
+    }
+  }
+  const structured = data?.structured_extraction || {};
+  for (const key of directKeys) {
+    const markdown = valueToDisplayMarkdown(field, structured[key]);
+    if (markdown) {
+      return markdown;
+    }
+  }
+  return "";
+}
+
+function valueToDisplayMarkdown(field, value) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "object") {
+    return structuredDisplayToMarkdown(field, value);
+  }
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const parsed = parseJsonLikeText(raw);
+  if (parsed && typeof parsed === "object") {
+    const markdown = structuredDisplayToMarkdown(field, parsed);
+    if (markdown) {
+      return markdown;
+    }
+  }
+  return raw;
+}
+
+function parseJsonLikeText(text) {
+  const raw = String(text || "").trim().replace(/^```(?:json)?\s*|\s*```$/gi, "").trim();
+  if (!raw || !["{", "["].includes(raw[0])) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) {
+      return null;
+    }
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function structuredDisplayToMarkdown(field, data) {
+  if (!data || typeof data !== "object") {
+    return "";
+  }
+  if (field === "business_content") {
+    return businessJsonToMarkdown(data);
+  }
+  if (field === "technical_scoring_requirements") {
+    return technicalJsonToMarkdown(data);
+  }
+  if (field === "qualification_compliance_requirements") {
+    return qualificationJsonToMarkdown(data);
+  }
+  if (field === "price_scoring_requirements") {
+    return scoringJsonToMarkdown(data);
+  }
+  return "";
+}
+
+function rowsFromStructured(data, key) {
+  if (Array.isArray(data)) {
+    return data;
+  }
+  const rows = data?.[key];
+  return Array.isArray(rows) ? rows : [];
+}
+
+function markdownCell(value) {
+  return String(value ?? "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\|/g, "｜")
+    .trim();
+}
+
+function sourceSuffix(row) {
+  const source = markdownCell(row?.evidence_snippet || row?.source_text || "");
+  return source ? `（原文依据：${source}）` : "";
+}
+
+function businessJsonToMarkdown(data) {
+  const rows = rowsFromStructured(data, "business_requirements");
+  const lines = ["# 商务内容", "", "| 项目 | 内容 |", "| --- | --- |"];
+  rows.forEach((row) => {
+    const item = markdownCell(row.item_name || row.requirement_type || "未明确");
+    const text = markdownCell(row.requirement_text || row.content || row.requirement || "") + sourceSuffix(row);
+    lines.push(`| ${item} | ${text || "未明确"} |`);
+  });
+  if (!rows.length) {
+    lines.push("| 未提取 | 未提取 |");
+  }
+  return lines.join("\n");
+}
+
+function technicalJsonToMarkdown(data) {
+  const rows = rowsFromStructured(data, "technical_requirements");
+  const lines = [
+    "# 技术要求",
+    "",
+    "| 要求分组 | 条目 | 具体要求 | 验收/指标 |",
+    "| --- | --- | --- | --- |"
+  ];
+  rows.forEach((row) => {
+    const requirement = markdownCell(row.requirement_text || row.content || row.requirement || "") + sourceSuffix(row);
+    lines.push(
+      `| ${markdownCell(row.requirement_group || "未明确")} | ${markdownCell(row.item_name || row.parameter_name || "未明确")} | ${requirement || "未明确"} | ${markdownCell(row.acceptance_criteria || row.parameter_value || "未明确")} |`
+    );
+  });
+  if (!rows.length) {
+    lines.push("| 未提取 | 未提取 | 未提取 | 未提取 |");
+  }
+  return lines.join("\n");
+}
+
+function qualificationJsonToMarkdown(data) {
+  const qualificationRows = rowsFromStructured(data, "qualification_requirements");
+  const rejectionRows = rowsFromStructured(data, "rejection_items");
+  const qualification = ["## 资格性审查", "| 序号 | 资格要求 | 需提供资料 |", "| --- | --- | --- |"];
+  const compliance = ["", "## 符合性审查", "| 序号 | 资格要求 | 需提供资料 |", "| --- | --- | --- |"];
+  let qualIndex = 1;
+  let compIndex = 1;
+  qualificationRows.forEach((row) => {
+    const reviewType = markdownCell(row.review_type || "");
+    const target = /符合|响应/.test(reviewType) ? compliance : qualification;
+    const index = target === compliance ? compIndex++ : qualIndex++;
+    target.push(
+      `| ${markdownCell(row.sequence_no || index)} | ${markdownCell(row.requirement_text || "未明确")}${sourceSuffix(row)} | ${markdownCell(row.required_materials || "未明确")} |`
+    );
+  });
+  if (qualIndex === 1) {
+    qualification.push("| 1 | 未提取 | 未提取 |");
+  }
+  if (compIndex === 1) {
+    compliance.push("| 1 | 未提取 | 未提取 |");
+  }
+  const rejection = ["", "## 废标项", "| 序号 | 废标项 | 具体表现 |", "| --- | --- | --- |"];
+  rejectionRows.forEach((row, index) => {
+    rejection.push(
+      `| ${markdownCell(row.sequence_no || index + 1)} | ${markdownCell(row.rejection_item || "未明确")} | ${markdownCell(row.specific_behavior || "未明确")}${sourceSuffix(row)} |`
+    );
+  });
+  if (!rejectionRows.length) {
+    rejection.push("| 1 | 未提取 | 未提取 |");
+  }
+  return [...qualification, ...compliance, ...rejection].join("\n");
+}
+
+function scoringJsonToMarkdown(data) {
+  const rows = rowsFromStructured(data, "scoring_items");
+  const business = [];
+  const technical = [];
+  rows.forEach((row) => {
+    const type = markdownCell(row.type || row.score_type || "");
+    if (/技术/.test(type)) {
+      technical.push(row);
+    } else {
+      business.push(row);
+    }
+  });
+  const lines = ["## 商务评分", "| 评分项 | 评分标准 | 分数 |", "| --- | --- | --- |"];
+  appendScoringMarkdownRows(lines, business);
+  lines.push("", "## 技术评分", "| 评分项 | 评分标准 | 分数 |", "| --- | --- | --- |");
+  appendScoringMarkdownRows(lines, technical);
+  return lines.join("\n");
+}
+
+function appendScoringMarkdownRows(lines, rows) {
+  if (!rows.length) {
+    lines.push("| 未提取 | 未提取 | 未提取 |");
+    return;
+  }
+  rows.forEach((row) => {
+    lines.push(
+      `| ${markdownCell(row.item || row.item_name || "未明确")} | ${markdownCell(row.standard || row.scoring_standard || "未明确")}${sourceSuffix(row)} | ${markdownCell(row.max_score || row.score_value || row.score_text || "未明确")} |`
+    );
+  });
 }
 
 function renderParseQuality(quality) {
@@ -2657,4 +3317,5 @@ syncMineruOptions();
 syncDeepThinkingOption();
 syncContentReviewDeepThinkingOption();
 initProjectRagFloatDrag();
+normalizeGenerationNavText();
 resetView();

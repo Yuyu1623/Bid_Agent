@@ -16,7 +16,6 @@ PARSE_METHOD_LABELS = {
     "mineru_pipeline": "MinerU Pipeline 模型",
     "mineru_html": "MinerU-HTML 模型",
     "mineru_parallel_pages": "MinerU 并行页段",
-    "mineru_local_pipeline": "本地 MinerU Pipeline",
     "pymupdf4llm": "PyMuPDF4LLM 快速 PDF",
     "docling": "Docling 结构化 PDF",
     "pdfplumber": "本地 pdfplumber PDF",

@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import shutil
-import subprocess
 import zipfile
 import importlib.util
 from contextlib import contextmanager
@@ -31,7 +29,6 @@ class BidDocumentSection(BaseModel):
 
 MINERU_PARSE_METHODS = {"mineru_vlm", "mineru_pipeline", "mineru_html"}
 PARALLEL_MINERU_PARSE_METHODS = {"mineru_parallel_pages"}
-LOCAL_MINERU_PARSE_METHODS = {"mineru_local_pipeline"}
 LOCAL_PARSE_METHODS = {
     "pymupdf4llm",
     "docling",
@@ -42,7 +39,6 @@ LOCAL_PARSE_METHODS = {
 SUPPORTED_PARSE_METHODS = (
     MINERU_PARSE_METHODS
     | PARALLEL_MINERU_PARSE_METHODS
-    | LOCAL_MINERU_PARSE_METHODS
     | LOCAL_PARSE_METHODS
 )
 
@@ -137,18 +133,6 @@ def parse_document_to_markdown(
             enable_table=enable_table,
             page_ranges=page_ranges,
             poll_interval=poll_interval,
-            timeout=timeout,
-        )
-
-    if parse_method == "mineru_local_pipeline":
-        return _parse_with_local_mineru_cli(
-            document=document,
-            output_dir=output_dir,
-            backend="pipeline",
-            language=language,
-            enable_formula=enable_formula,
-            enable_table=enable_table,
-            page_ranges=page_ranges,
             timeout=timeout,
         )
 
@@ -623,15 +607,77 @@ def _parse_markdown_table(lines: list[str]) -> dict[str, Any] | None:
     ]
     if not data_lines:
         return None
-    rows = [[cell.strip() for cell in line.split("|")[1:-1]] for line in data_lines]
+    rows = _expand_merged_like_table_rows(
+        [[cell.strip() for cell in line.split("|")[1:-1]] for line in data_lines]
+    )
     header = rows[0] if rows else []
     body = rows[1:] if len(rows) > 1 else []
     return {
         "headers": header,
         "rows": body,
+        "row_cell_header_maps": [
+            _build_cell_header_map(row, header)
+            for row in body
+        ],
         "row_count": len(body),
         "markdown": "\n".join(lines),
     }
+
+
+def _expand_merged_like_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    expanded: list[list[str]] = []
+    previous: list[str] = []
+    for row_index, row in enumerate(rows):
+        normalized = _expand_merged_like_table_row(
+            row,
+            previous if row_index > 0 else [],
+            fill_from_left=row_index == 0,
+        )
+        expanded.append(normalized)
+        previous = normalized
+    return expanded
+
+
+def _expand_merged_like_table_row(
+    row: list[str],
+    previous_row: list[str] | None = None,
+    *,
+    fill_from_left: bool = False,
+) -> list[str]:
+    previous = previous_row or []
+    width = max(len(row), len(previous))
+    output: list[str] = []
+    last_value = ""
+    for index in range(width):
+        value = str(row[index]).strip() if index < len(row) else ""
+        if value:
+            last_value = value
+        elif fill_from_left and last_value:
+            value = last_value
+        elif index < len(previous):
+            value = str(previous[index]).strip()
+        output.append(value)
+    return output
+
+
+def _build_cell_header_map(row: list[str], header: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for index, cell in enumerate(row):
+        key = str(header[index]).strip() if index < len(header) and str(header[index]).strip() else f"col_{index + 1}"
+        mapping[key] = str(cell).strip()
+    return mapping
+
+
+def _normalize_openpyxl_merged_cells(ws: Any) -> None:
+    merged_ranges = list(getattr(getattr(ws, "merged_cells", None), "ranges", []) or [])
+    for merged_range in merged_ranges:
+        min_row, min_col = merged_range.min_row, merged_range.min_col
+        max_row, max_col = merged_range.max_row, merged_range.max_col
+        value = ws.cell(row=min_row, column=min_col).value
+        ws.unmerge_cells(str(merged_range))
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                ws.cell(row=row, column=col).value = value
 
 
 def _guess_page_number(markdown: str) -> int | None:
@@ -1129,74 +1175,6 @@ def _merge_text_blocks(blocks: List[str]) -> str:
             seen.add(clean_line)
             lines.append(clean_line)
     return "\n".join(lines).strip()
-
-
-def _parse_with_local_mineru_cli(
-    document: str,
-    output_dir: Optional[str],
-    backend: str,
-    language: str,
-    enable_formula: bool,
-    enable_table: bool,
-    page_ranges: Optional[str],
-    timeout: int,
-) -> str:
-    path = Path(document).expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Document file not found: {path}")
-
-    mineru_command = os.getenv("MINERU_LOCAL_COMMAND", "mineru")
-    if not shutil.which(mineru_command):
-        raise RuntimeError(
-            "Local MinerU command not found. Install MinerU first, or set "
-            "MINERU_LOCAL_COMMAND to the full mineru executable path."
-        )
-
-    with TemporaryDirectory() as temp_dir:
-        target_dir = Path(output_dir).expanduser().resolve() if output_dir else Path(temp_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        command = [
-            mineru_command,
-            "-p",
-            str(path),
-            "-o",
-            str(target_dir),
-            "-b",
-            backend,
-            "-l",
-            language,
-        ]
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "Local MinerU parse failed: "
-                f"returncode={result.returncode}, stdout={result.stdout[-1000:]}, "
-                f"stderr={result.stderr[-1000:]}"
-            )
-
-        return _find_local_mineru_markdown(target_dir)
-
-
-def _find_local_mineru_markdown(output_dir: Path) -> str:
-    markdown_files = sorted(
-        output_dir.rglob("*.md"),
-        key=lambda item: (
-            0 if item.name.lower() in {"full.md", "origin.md"} else 1,
-            len(str(item)),
-        ),
-    )
-    if not markdown_files:
-        raise RuntimeError(f"Local MinerU output does not contain Markdown files: {output_dir}")
-    return markdown_files[0].read_text(encoding="utf-8")
 
 
 def _parse_pdf_with_pymupdf4llm(document: str, page_ranges: Optional[str]) -> str:

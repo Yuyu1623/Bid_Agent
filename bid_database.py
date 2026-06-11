@@ -28,6 +28,15 @@ KNOWLEDGE_TYPES = {
 }
 
 
+TABLE_METADATA_HEADERS = {
+    "business_requirements": ["\u6761\u6b3e", "\u8981\u6c42"],
+    "technical_requirements": ["\u9879\u76ee", "\u53c2\u6570/\u8981\u6c42", "\u8bf4\u660e"],
+    "qualification_requirements": ["\u5e8f\u53f7", "\u8d44\u683c\u8981\u6c42", "\u9700\u63d0\u4f9b\u8d44\u6599"],
+    "rejection_items": ["\u5e8f\u53f7", "\u5e9f\u6807\u9879", "\u5177\u4f53\u8868\u73b0"],
+    "scoring_items": ["\u8bc4\u5206\u9879", "\u8bc4\u5206\u6807\u51c6", "\u5206\u503c"],
+}
+
+
 def init_database(db_path: Path = DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     vector_index_result: dict[str, Any] = {}
@@ -114,6 +123,18 @@ def init_database(db_path: Path = DB_PATH) -> None:
             create index if not exists idx_sections_project on document_sections(project_id);
             create index if not exists idx_sections_document on document_sections(document_id);
             create index if not exists idx_chunks_project on document_chunks(project_id);
+
+            create virtual table if not exists document_chunks_fts using fts5(
+                chunk_id unindexed,
+                project_id unindexed,
+                module unindexed,
+                item_type unindexed,
+                section_id unindexed,
+                title_path,
+                content,
+                metadata_text,
+                tokenize = 'unicode61'
+            );
 
             create table if not exists extraction_runs (
                 id text primary key,
@@ -459,6 +480,9 @@ def init_database(db_path: Path = DB_PATH) -> None:
                 "metadata_json": "text default '{}'",
             },
         )
+        _backfill_table_cell_header_maps(conn)
+        _backfill_project_budget_amounts(conn)
+        _rebuild_document_chunks_fts_if_empty(conn)
 
 
 def list_knowledge_entries(
@@ -712,6 +736,7 @@ def delete_project(project_id: str, db_path: Path = DB_PATH) -> dict[str, Any]:
                 (project_id,),
             )
             deleted[table_name] = cursor.rowcount
+        conn.execute("delete from document_chunks_fts where project_id = ?", (project_id,))
         cursor = conn.execute("delete from projects where id = ?", (project_id,))
         deleted["projects"] = cursor.rowcount
     return {"deleted": True, "tables": deleted}
@@ -736,6 +761,8 @@ def delete_project_record(
             f"delete from {quote_identifier(table_name)} where id = ?",
             (record_id,),
         )
+        if table_name == "document_chunks":
+            conn.execute("delete from document_chunks_fts where chunk_id = ?", (record_id,))
     return {"deleted": cursor.rowcount > 0, "record": _row_to_dict(row)}
 
 
@@ -772,7 +799,7 @@ def save_analysis_result(
                 profile_values.get("项目类别（服务类，货物类，工程类）和服务年限", ""),
                 profile_values.get("招标人", ""),
                 profile_values.get("招标代理机构", ""),
-                _extract_amount(profile_values.get("项目规模和预算", "")),
+                _extract_budget_amount(profile_values),
                 "待核对",
                 now,
                 now,
@@ -799,6 +826,15 @@ def save_analysis_result(
         )
 
         chunk_ids = _insert_sections_as_chunks(conn, project_id, document_id, sections, now)
+        chunk_ids.extend(
+            _insert_image_analysis_chunks(
+                conn,
+                project_id=project_id,
+                document_id=document_id,
+                items=analysis.get("image_analysis_items", []),
+                now=now,
+            )
+        )
         _insert_project_profile(conn, project_id, analysis.get("project_overview", ""), profile_values, now)
         structured = analysis.get("structured_extraction") if isinstance(analysis.get("structured_extraction"), dict) else {}
         if structured:
@@ -889,6 +925,143 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str
             conn.execute(
                 f"alter table {quote_identifier(table_name)} add column {quote_identifier(column_name)} {column_type}"
             )
+
+
+def _backfill_table_cell_header_maps(conn: sqlite3.Connection) -> None:
+    for table_name, default_headers in TABLE_METADATA_HEADERS.items():
+        rows = conn.execute(
+            f"""
+            select id, metadata_json
+            from {quote_identifier(table_name)}
+            where metadata_json like '%"cells"%'
+              and metadata_json not like '%"cell_header_map"%'
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            cells = metadata.get("cells")
+            if not isinstance(cells, list) or not cells:
+                continue
+            cell_values = [str(cell).strip() for cell in cells]
+            header_paths = metadata.get("header_paths")
+            if not isinstance(header_paths, list) or not header_paths:
+                header_paths = default_headers[: len(cell_values)]
+            header_values = [
+                str(header).strip() if str(header).strip() else f"col_{index + 1}"
+                for index, header in enumerate(header_paths)
+            ]
+            while len(header_values) < len(cell_values):
+                header_values.append(f"col_{len(header_values) + 1}")
+            header_values = header_values[: len(cell_values)]
+            metadata["cells"] = cell_values
+            metadata["header_paths"] = header_values
+            metadata["cell_header_map"] = {
+                header_values[index]: cell
+                for index, cell in enumerate(cell_values)
+            }
+            metadata["parent_table_header"] = metadata.get("parent_table_header") or " > ".join(header_values)
+            metadata["source_format"] = metadata.get("source_format") or "markdown_table"
+            conn.execute(
+                f"update {quote_identifier(table_name)} set metadata_json = ? where id = ?",
+                (json.dumps(metadata, ensure_ascii=False), row["id"]),
+            )
+
+
+def _backfill_project_budget_amounts(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        select p.id, p.project_name, p.budget_amount, pp.budget_text, pp.package_no
+        from projects p
+        left join project_profile pp on pp.project_id = p.id
+        where pp.budget_text is not null and trim(pp.budget_text) <> ''
+        """
+    ).fetchall()
+    for row in rows:
+        package_hint = str(row["package_no"] or "")
+        if not package_hint:
+            match = re.search(r"(?:包|第)\s*([A-Za-z0-9一二三四五六七八九十]+)\s*(?:包)?", str(row["project_name"] or ""))
+            package_hint = match.group(1) if match else ""
+        amount = _extract_budget_amount(str(row["budget_text"] or ""), package_hint=package_hint)
+        if amount is None:
+            continue
+        current = row["budget_amount"]
+        if current is None or abs(float(current) - amount) > 0.01:
+            conn.execute(
+                "update projects set budget_amount = ?, updated_at = ? where id = ?",
+                (amount, _now(), row["id"]),
+            )
+            conn.execute(
+                "update project_profile set budget_amount = ?, updated_at = ? where project_id = ?",
+                (amount, _now(), row["id"]),
+            )
+
+
+def _rebuild_document_chunks_fts_if_empty(conn: sqlite3.Connection) -> None:
+    try:
+        count = conn.execute("select count(*) as count from document_chunks_fts").fetchone()["count"]
+    except sqlite3.OperationalError:
+        return
+    if int(count or 0) > 0:
+        return
+    rows = conn.execute("select * from document_chunks").fetchall()
+    for row in rows:
+        _upsert_document_chunk_fts(conn, dict(row))
+
+
+def _upsert_document_chunk_fts(conn: sqlite3.Connection, chunk: dict[str, Any]) -> None:
+    metadata = _safe_json_loads(chunk.get("metadata_json"), {})
+    item_type = str(metadata.get("item_type") or chunk.get("chunk_type") or "")
+    metadata_text = " ".join(
+        str(value)
+        for value in (
+            metadata.get("hierarchy_path"),
+            metadata.get("parent_table_header"),
+            metadata.get("source_format"),
+            metadata.get("vector_role"),
+            metadata.get("image_id"),
+            metadata.get("ocr_text"),
+            metadata.get("ai_note"),
+        )
+        if value
+    )
+    conn.execute("delete from document_chunks_fts where chunk_id = ?", (chunk.get("id"),))
+    conn.execute(
+        """
+        insert into document_chunks_fts
+            (chunk_id, project_id, module, item_type, section_id, title_path, content, metadata_text)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(chunk.get("id") or ""),
+            str(chunk.get("project_id") or ""),
+            str(chunk.get("module") or metadata.get("module") or ""),
+            item_type,
+            str(chunk.get("section_id") or ""),
+            str(chunk.get("title_path") or ""),
+            "\n".join(
+                part
+                for part in (
+                    str(chunk.get("content") or ""),
+                    str(chunk.get("content_markdown") or ""),
+                    str(chunk.get("source_text") or ""),
+                )
+                if part
+            ),
+            metadata_text,
+        ),
+    )
+
+
+def _safe_json_loads(value: Any, default: Any) -> Any:
+    try:
+        return json.loads(value or "{}")
+    except Exception:
+        return default
 
 
 def _knowledge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -999,9 +1172,21 @@ def _insert_sections_as_chunks(
             section_title=hierarchy_base,
             module=section_type,
         ):
+            if (chunk.get("metadata") or {}).get("vector_role") == "section_summary":
+                chunk["metadata"]["summary_of"] = section_id
+                chunk["metadata"]["summary_scope"] = "section"
             chunk_index += 1
             chunk_id = f"chk_{uuid4().hex}"
             chunk_ids.append(chunk_id)
+            metadata_json = dumps_json(
+                _chunk_metadata(
+                    chunk=chunk,
+                    section_title=title,
+                    section_id=section_id,
+                    section_metadata=section_metadata,
+                    module=section_type,
+                )
+            )
             conn.execute(
                 """
                 insert into document_chunks
@@ -1024,19 +1209,146 @@ def _insert_sections_as_chunks(
                     _to_int(_section_value(section, "page_end")),
                     chunk["source_text"][:2000],
                     dumps_json(chunk.get("tags", [])),
-                    dumps_json(
-                        _chunk_metadata(
-                            chunk=chunk,
-                            section_title=title,
-                            section_id=section_id,
-                            section_metadata=section_metadata,
-                            module=section_type,
-                        )
-                    ),
+                    metadata_json,
                     "未确认",
                     now,
                 ),
             )
+            _upsert_document_chunk_fts(
+                conn,
+                {
+                    "id": chunk_id,
+                    "project_id": project_id,
+                    "document_id": document_id,
+                    "section_id": section_id,
+                    "chunk_type": chunk["chunk_type"],
+                    "module": section_type,
+                    "title_path": chunk["title_path"],
+                    "content": chunk["content"],
+                    "content_markdown": chunk.get("content_markdown", ""),
+                    "source_text": chunk["source_text"][:2000],
+                    "metadata_json": metadata_json,
+                },
+            )
+    return chunk_ids
+
+
+def _insert_image_analysis_chunks(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    document_id: str,
+    items: Any,
+    now: str,
+) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    current = conn.execute(
+        "select coalesce(max(chunk_index), 0) as max_index from document_chunks where project_id = ?",
+        (project_id,),
+    ).fetchone()
+    chunk_index = int(current["max_index"] or 0)
+    chunk_ids: list[str] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        image_id = str(item.get("image_id") or f"img_{index:04d}")
+        ocr_text = str(item.get("ocr_text") or "").strip()
+        ai_note = str(item.get("ai_note") or "").strip()
+        file_name = str(item.get("file_name") or item.get("source") or image_id)
+        content = "\n".join(
+            part
+            for part in [
+                f"图片ID：{image_id}",
+                f"文件：{file_name}",
+                f"OCR：{ocr_text}" if ocr_text else "",
+                f"AI描述：{ai_note}" if ai_note else "",
+            ]
+            if part
+        ).strip()
+        if not content:
+            continue
+        chunk_index += 1
+        chunk_id = f"chk_{uuid4().hex}"
+        chunk_ids.append(chunk_id)
+        thumbnail_data_url = str(item.get("thumbnail_data_url") or "")
+        image_data_url = str(item.get("image_data_url") or "")
+        metadata = {
+            "source_format": "image_analysis",
+            "item_type": "图片文字",
+            "image_id": image_id,
+            "image_ref": str(item.get("image_ref") or item.get("source") or ""),
+            "file_name": file_name,
+            "source": str(item.get("source") or ""),
+            "thumbnail_data_url": thumbnail_data_url,
+            "has_image_payload": bool(thumbnail_data_url or image_data_url),
+            "has_multimodal_embedding": bool(item.get("has_multimodal_embedding")),
+            "ocr_text": ocr_text,
+            "ai_note": ai_note,
+            "importance_score": 1.15,
+            "vector_role": "image_evidence",
+        }
+        if image_data_url and len(image_data_url) <= 2_000_000:
+            metadata["image_data_url"] = image_data_url
+        elif image_data_url:
+            metadata["image_data_url_omitted"] = True
+            metadata["image_data_url_size"] = len(image_data_url)
+        metadata_json = dumps_json(
+            _chunk_metadata(
+                chunk={
+                    "chunk_type": "图片文字",
+                    "title_path": f"图片解析 > 图片 {index}",
+                    "metadata": metadata,
+                },
+                section_title="图片解析",
+                section_id="",
+                section_metadata={},
+                module="图片解析",
+            )
+        )
+        conn.execute(
+            """
+            insert into document_chunks
+                (id, project_id, document_id, section_id, chunk_index, chunk_type, module, title_path, content,
+                 content_markdown, page_start, page_end, source_text, tags_json, metadata_json, confirmed_status, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chunk_id,
+                project_id,
+                document_id,
+                None,
+                chunk_index,
+                "图片文字",
+                "图片解析",
+                f"图片解析 > 图片 {index}",
+                content,
+                f"![图片 {index}]({thumbnail_data_url})\n\n{content}" if thumbnail_data_url else content,
+                None,
+                None,
+                content[:2000],
+                dumps_json(["图片解析", "图片文字", image_id]),
+                metadata_json,
+                "未确认",
+                now,
+            ),
+        )
+        _upsert_document_chunk_fts(
+            conn,
+            {
+                "id": chunk_id,
+                "project_id": project_id,
+                "document_id": document_id,
+                "section_id": "",
+                "chunk_type": "图片文字",
+                "module": "图片解析",
+                "title_path": f"图片解析 > 图片 {index}",
+                "content": content,
+                "content_markdown": f"![图片 {index}]({thumbnail_data_url})\n\n{content}" if thumbnail_data_url else content,
+                "source_text": content[:2000],
+                "metadata_json": metadata_json,
+            },
+        )
     return chunk_ids
 
 
@@ -1065,7 +1377,7 @@ def _insert_project_profile(
             values.get("项目类别（服务类，货物类，工程类）和服务年限", ""),
             values.get("包号", ""),
             values.get("项目规模和预算", ""),
-            _extract_amount(values.get("项目规模和预算", "")),
+            _extract_budget_amount(values),
             values.get("招标人", ""),
             values.get("招标代理机构", ""),
             values.get("项目所属领域", ""),
@@ -1275,24 +1587,20 @@ def _normalization_metadata(text: str) -> dict[str, Any]:
 
 
 def _normalize_money(text: str) -> dict[str, Any]:
-    value = str(text or "")
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(亿元|万元|元|人民币|CNY)", value, re.IGNORECASE)
-    if not match:
+    amount_cny = _extract_money_amount(str(text or ""), prefer_budget_context=False)
+    if amount_cny is None:
         return {}
-    amount = float(match.group(1))
-    unit = match.group(2)
-    multiplier = 1.0
-    if unit == "万元":
-        multiplier = 10000.0
-    elif unit == "亿元":
-        multiplier = 100000000.0
-    amount_cny = amount * multiplier
     return {
         "amount_value": amount_cny,
+        "amount_cny": amount_cny,
         "amount_currency": "CNY",
-        "amount_normalized": f"{amount_cny:g} CNY",
-        "amount_source_unit": unit,
+        "amount_normalized": _format_plain_number(amount_cny),
     }
+
+
+def _format_plain_number(value: float) -> str:
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _normalize_time(text: str) -> dict[str, Any]:
@@ -1415,7 +1723,7 @@ def _insert_business_requirements(conn: sqlite3.Connection, project_id: str, mar
                 row["section"],
                 cells[0] if cells else "",
                 requirement,
-                dumps_json({"source_format": "markdown_table", "cells": cells}),
+                dumps_json(_table_row_metadata(row)),
                 "未确认",
                 now,
             ),
@@ -1454,7 +1762,7 @@ def _insert_technical_requirements(conn: sqlite3.Connection, project_id: str, ma
                     row["section"],
                     cells[0] if cells else "",
                     " | ".join(cells),
-                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    dumps_json(_table_row_metadata(row)),
                     "未确认",
                     now,
                 ),
@@ -1519,7 +1827,7 @@ def _insert_qualification_and_rejection(conn: sqlite3.Connection, project_id: st
                     section,
                     cells[0] if cells else "",
                     " | ".join(cells),
-                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    dumps_json(_table_row_metadata(row)),
                     "未确认",
                     now,
                 ),
@@ -1546,7 +1854,7 @@ def _insert_qualification_and_rejection(conn: sqlite3.Connection, project_id: st
                     section,
                     cells[0] if cells else "",
                     " | ".join(cells),
-                    dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    dumps_json(_table_row_metadata(row)),
                     "未确认",
                     now,
                 ),
@@ -1580,7 +1888,7 @@ def _insert_scoring_items(conn: sqlite3.Connection, project_id: str, markdown: s
                 row["section"],
                 cells[0],
                 " | ".join(cells),
-                dumps_json({"source_format": "markdown_table", "cells": cells}),
+                    dumps_json(_table_row_metadata(row)),
                 "未确认",
                 now,
             ),
@@ -1668,16 +1976,21 @@ def _parse_table_lines(lines: list[str], section: str) -> list[dict[str, Any]]:
     )
     if separator_index <= 0:
         return []
-    header_rows = [_table_cells(line) for line in lines[:separator_index]]
+    header_rows = _expand_merged_like_table_rows(
+        [_table_cells(line) for line in lines[:separator_index]],
+        fill_from_previous_row=False,
+    )
     data_lines = lines[separator_index + 1 :]
     if not header_rows or not data_lines:
         return []
     header_paths = _table_header_paths(header_rows)
     output = []
+    previous_cells: list[str] = []
     for line in data_lines:
         if not line.strip().startswith("|") or not line.strip().endswith("|"):
             continue
-        cells = _table_cells(line)
+        cells = _expand_merged_like_table_row(_table_cells(line), previous_cells)
+        previous_cells = cells
         if any(cells) and not all(cell in {"", "未提及", "未明确"} for cell in cells):
             output.append(
                 {
@@ -1693,8 +2006,69 @@ def _parse_table_lines(lines: list[str], section: str) -> list[dict[str, Any]]:
     return output
 
 
+def _table_row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    cells = [str(cell).strip() for cell in row.get("cells", [])]
+    header_paths = [str(header).strip() for header in row.get("headers", [])]
+    if not header_paths:
+        header_paths = [f"列{index + 1}" for index in range(len(cells))]
+    cell_header_map = row.get("cell_header_map")
+    if not isinstance(cell_header_map, dict) or not cell_header_map:
+        cell_header_map = {
+            header_paths[index] if index < len(header_paths) else f"列{index + 1}": cell
+            for index, cell in enumerate(cells)
+        }
+    return {
+        "source_format": "markdown_table",
+        "section": row.get("section") or "未分组",
+        "cells": cells,
+        "header_paths": header_paths[: len(cells)],
+        "cell_header_map": cell_header_map,
+        "parent_table_header": " > ".join(header_paths[: len(cells)]),
+    }
+
+
 def _table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in str(line).strip().split("|")[1:-1]]
+
+
+def _expand_merged_like_table_rows(
+    rows: list[list[str]],
+    *,
+    fill_from_previous_row: bool = True,
+) -> list[list[str]]:
+    expanded: list[list[str]] = []
+    previous: list[str] = []
+    for row in rows:
+        normalized = _expand_merged_like_table_row(
+            row,
+            previous if fill_from_previous_row else [],
+            fill_from_left=True,
+        )
+        expanded.append(normalized)
+        previous = normalized
+    return expanded
+
+
+def _expand_merged_like_table_row(
+    row: list[str],
+    previous_row: list[str] | None = None,
+    *,
+    fill_from_left: bool = False,
+) -> list[str]:
+    previous = previous_row or []
+    width = max(len(row), len(previous))
+    output: list[str] = []
+    last_value = ""
+    for index in range(width):
+        value = str(row[index]).strip() if index < len(row) else ""
+        if value:
+            last_value = value
+        elif fill_from_left and last_value:
+            value = last_value
+        elif index < len(previous):
+            value = str(previous[index]).strip()
+        output.append(value)
+    return output
 
 
 def _table_header_paths(header_rows: list[list[str]]) -> list[str]:
@@ -1817,40 +2191,28 @@ def _semantic_chunks_from_markdown(markdown: str, section_title: str, module: st
             }
         )
 
-    for row_index, row in enumerate(_markdown_tables(markdown), start=1):
-        cells = [cell for cell in row["cells"] if str(cell).strip()]
-        header_paths = row.get("headers") or []
-        cell_header_map = row.get("cell_header_map") or {}
-        if cell_header_map:
-            content = "；".join(
-                f"{header}: {cell}"
-                for header, cell in cell_header_map.items()
-                if str(cell).strip()
-            ).strip()
-        else:
-            content = " | ".join(cells).strip()
-        if not content or is_duplicate_text(content, seen):
+    for table_index, table in enumerate(_group_markdown_table_rows(_markdown_tables(markdown)), start=1):
+        table_rows = table["rows"]
+        if _is_large_table(table_rows):
+            chunks.extend(
+                _large_table_chunks(
+                    table=table,
+                    table_index=table_index,
+                    section_title=section_title,
+                    module=module,
+                    seen=seen,
+                )
+            )
             continue
-        chunks.append(
-            {
-                "chunk_type": "表格行",
-                "title_path": _append_path(section_title, row["section"]),
-                "content": content,
-                "content_markdown": "| " + " | ".join(cells) + " |",
-                "source_text": content,
-                "tags": [module, "表格"],
-                "metadata": {
-                    "source_format": "markdown_table",
-                    "item_type": "表格行",
-                    "row_index": row_index,
-                    "cells": cells,
-                    "header_paths": header_paths,
-                    "cell_header_map": cell_header_map,
-                    "table_header_path": _append_path(section_title, row["section"]),
-                    "parent_table_header": " > ".join(header_paths),
-                },
-            }
-        )
+        for row_index, row in enumerate(table_rows, start=1):
+            row_chunk = _table_row_chunk(
+                row=row,
+                row_index=row_index,
+                section_title=section_title,
+                module=module,
+            )
+            if row_chunk and not is_duplicate_text(row_chunk["content"], seen):
+                chunks.append(row_chunk)
 
     for item in _structured_markdown_items(markdown, section_title):
         content = item["text"].strip()
@@ -1891,6 +2253,168 @@ def _semantic_chunks_from_markdown(markdown: str, section_title: str, module: st
             }
         )
     return chunks
+
+
+TABLE_ROW_GROUP_SIZE = 3
+LARGE_TABLE_ROW_THRESHOLD = 20
+
+
+def _group_markdown_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for row in rows:
+        key = (row.get("section") or "", tuple(row.get("headers") or []))
+        if not current or current["key"] != key:
+            current = {
+                "key": key,
+                "section": row.get("section") or "ungrouped",
+                "headers": row.get("headers") or [],
+                "rows": [],
+            }
+            tables.append(current)
+        current["rows"].append(row)
+    return tables
+
+
+def _is_large_table(rows: list[dict[str, Any]]) -> bool:
+    return len(rows) > LARGE_TABLE_ROW_THRESHOLD
+
+
+def _table_row_chunk(
+    *,
+    row: dict[str, Any],
+    row_index: int,
+    section_title: str,
+    module: str,
+) -> dict[str, Any] | None:
+    cells = [cell for cell in row["cells"] if str(cell).strip()]
+    header_paths = row.get("headers") or []
+    cell_header_map = row.get("cell_header_map") or {}
+    content = _table_row_content(cells, cell_header_map)
+    if not content:
+        return None
+    return {
+        "chunk_type": "表格行",
+        "title_path": _append_path(section_title, row["section"]),
+        "content": content,
+        "content_markdown": "| " + " | ".join(cells) + " |",
+        "source_text": content,
+        "tags": [module, "表格"],
+        "metadata": {
+            "source_format": "markdown_table",
+            "item_type": "表格行",
+            "table_size": "small",
+            "row_index": row_index,
+            "cells": cells,
+            "header_paths": header_paths,
+            "cell_header_map": cell_header_map,
+            "table_header_path": _append_path(section_title, row["section"]),
+            "parent_table_header": " > ".join(header_paths),
+        },
+    }
+
+
+def _large_table_chunks(
+    *,
+    table: dict[str, Any],
+    table_index: int,
+    section_title: str,
+    module: str,
+    seen: set[str],
+) -> list[dict[str, Any]]:
+    rows = table["rows"]
+    header_paths = [str(item).strip() for item in table.get("headers") or [] if str(item).strip()]
+    title_path = _append_path(section_title, table.get("section") or "")
+    overview_id = f"table_{table_index:03d}_overview"
+    header_summary = " > ".join(header_paths)
+    overview_content = (
+        f"表格说明：{title_path}\n"
+        f"字段：{header_summary or '未识别表头'}\n"
+        f"行数：{len(rows)}\n"
+        f"用途：该 chunk 用于说明大表结构，具体数据位于 table_row_group chunk。"
+    )
+    chunks: list[dict[str, Any]] = []
+    if not is_duplicate_text(overview_content, seen):
+        chunks.append(
+            {
+                "chunk_type": "表格说明",
+                "title_path": title_path,
+                "content": overview_content,
+                "content_markdown": overview_content,
+                "source_text": overview_content,
+                "tags": [module, "表格", "表格说明"],
+                "metadata": {
+                    "source_format": "markdown_table",
+                    "item_type": "table_overview",
+                    "table_size": "large",
+                    "table_index": table_index,
+                    "table_overview_id": overview_id,
+                    "row_count": len(rows),
+                    "header_paths": header_paths,
+                    "parent_table_header": header_summary,
+                    "importance_score": 1.3,
+                },
+            }
+        )
+
+    for group_index, start in enumerate(range(0, len(rows), TABLE_ROW_GROUP_SIZE), start=1):
+        group_rows = rows[start : start + TABLE_ROW_GROUP_SIZE]
+        row_texts = []
+        markdown_lines = []
+        group_metadata_rows = []
+        for offset, row in enumerate(group_rows, start=start + 1):
+            cells = [cell for cell in row["cells"] if str(cell).strip()]
+            cell_header_map = row.get("cell_header_map") or {}
+            row_content = _table_row_content(cells, cell_header_map)
+            if not row_content:
+                continue
+            row_texts.append(f"第{offset}行：{row_content}")
+            markdown_lines.append("| " + " | ".join(cells) + " |")
+            group_metadata_rows.append(
+                {
+                    "row_index": offset,
+                    "cells": cells,
+                    "cell_header_map": cell_header_map,
+                }
+            )
+        content = "\n".join(row_texts).strip()
+        if not content or is_duplicate_text(content, seen):
+            continue
+        chunks.append(
+            {
+                "chunk_type": "表格行组",
+                "title_path": title_path,
+                "content": content,
+                "content_markdown": "\n".join(markdown_lines),
+                "source_text": content,
+                "tags": [module, "表格", "表格行组"],
+                "metadata": {
+                    "source_format": "markdown_table",
+                    "item_type": "table_row_group",
+                    "table_size": "large",
+                    "table_index": table_index,
+                    "group_index": group_index,
+                    "row_start": start + 1,
+                    "row_end": start + len(group_rows),
+                    "row_count": len(group_rows),
+                    "header_paths": header_paths,
+                    "rows": group_metadata_rows,
+                    "parent_table_overview_id": overview_id,
+                    "parent_table_header": header_summary or overview_id,
+                },
+            }
+        )
+    return chunks
+
+
+def _table_row_content(cells: list[str], cell_header_map: dict[str, Any]) -> str:
+    if cell_header_map:
+        return "；".join(
+            f"{header}: {cell}"
+            for header, cell in cell_header_map.items()
+            if str(cell).strip()
+        ).strip()
+    return " | ".join(cells).strip()
 
 
 def _section_summary_text(markdown: str, max_chars: int = 1200) -> str:
@@ -2087,12 +2611,174 @@ def _business_type(section: str, item_name: str) -> str:
 
 
 def _extract_amount(text: str) -> float | None:
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(万|万元|元|分)?", str(text or ""))
-    if not match:
+    return _extract_money_amount(str(text or ""), prefer_budget_context=False)
+
+
+def _extract_budget_amount(values: dict[str, str] | str, package_hint: str = "") -> float | None:
+    if isinstance(values, dict):
+        preferred_keys = [
+            "项目规模和预算",
+            "预算金额",
+            "项目预算",
+            "采购预算",
+            "最高限价",
+            "最高投标限价",
+            "控制价",
+            "拦标价",
+            "限价",
+        ]
+        preferred_text = " ".join(
+            str(value)
+            for key, value in values.items()
+            if any(keyword in str(key) for keyword in preferred_keys) and value
+        )
+        all_text = " ".join(str(value) for value in values.values() if value)
+        text = f"{preferred_text} {all_text}".strip()
+        package_hint = package_hint or _profile_package_hint(values)
+    else:
+        text = str(values or "")
+    return _extract_money_amount(text, prefer_budget_context=True, package_hint=package_hint)
+
+
+def _extract_money_amount(text: str, *, prefer_budget_context: bool = False, package_hint: str = "") -> float | None:
+    value = str(text or "")
+    if not value.strip():
         return None
-    value = float(match.group(1))
-    unit = match.group(2) or ""
-    return value * 10000 if "万" in unit else value
+    candidates = _money_candidates(value)
+    if not candidates:
+        return None
+    package_patterns = _package_hint_patterns(package_hint)
+    if package_patterns:
+        package_contextual = [
+            item
+            for item in candidates
+            if any(re.search(pattern, value[max(0, item["start"] - 32) : item["start"]]) for pattern in package_patterns)
+        ]
+        if package_contextual:
+            candidates = package_contextual
+    if prefer_budget_context:
+        context_keywords = ("预算", "最高限价", "采购金额", "项目金额", "控制价", "拦标价", "限价", "总价", "合同估算价")
+        contextual = [
+            item
+            for item in candidates
+            if any(keyword in value[max(0, item["start"] - 24) : item["end"] + 24] for keyword in context_keywords)
+        ]
+        if contextual:
+            candidates = contextual
+    return max(float(item["amount"]) for item in candidates)
+
+
+def _profile_package_hint(values: dict[str, str]) -> str:
+    for key, value in values.items():
+        if "包号" in str(key) and value:
+            return str(value)
+    combined = " ".join(str(value) for value in values.values() if value)
+    match = re.search(r"(?:包|第)\s*([A-Za-z0-9一二三四五六七八九十]+)\s*(?:包)?", combined)
+    return match.group(1) if match else ""
+
+
+def _package_hint_patterns(package_hint: str) -> list[str]:
+    value = str(package_hint or "").strip()
+    if not value:
+        return []
+    match = re.search(r"([A-Za-z0-9一二三四五六七八九十]+)", value)
+    if not match:
+        return []
+    token = re.escape(match.group(1))
+    return [
+        rf"包\s*{token}",
+        rf"第\s*{token}\s*包",
+        rf"{token}\s*包",
+    ]
+
+
+def _money_candidates(text: str) -> list[dict[str, Any]]:
+    normalized = str(text or "").replace(",", "").replace("，", "")
+    pattern = re.compile(
+        r"(?<![\d.])(?:人民币|RMB|CNY|￥)?\s*([0-9]+(?:\.[0-9]+)?)\s*(亿元|亿|万元|万|元|CNY|RMB)?",
+        re.IGNORECASE,
+    )
+    output: list[dict[str, Any]] = []
+    for match in pattern.finditer(normalized):
+        number_text = match.group(1)
+        unit = match.group(2) or ""
+        amount = float(number_text)
+        if unit in {"亿元", "亿"}:
+            amount *= 100000000
+        elif unit in {"万元", "万"}:
+            amount *= 10000
+        elif unit.lower() in {"cny", "rmb"}:
+            amount = float(number_text)
+        if not unit and amount < 1000:
+            nearby = normalized[max(0, match.start() - 8) : match.end() + 8]
+            if not re.search(r"预算|金额|限价|报价|人民币|RMB|CNY|￥", nearby, re.IGNORECASE):
+                continue
+        output.append({"amount": amount, "start": match.start(), "end": match.end(), "unit": unit})
+    chinese_pattern = re.compile(r"(?:人民币)?\s*([零〇一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟]+)\s*(亿元|亿|万元|万|元)")
+    for match in chinese_pattern.finditer(normalized):
+        if match.group(1) in {"万", "亿"}:
+            continue
+        amount = _chinese_number_to_float(match.group(1))
+        if amount is None:
+            continue
+        unit = match.group(2)
+        if unit in {"亿元", "亿"}:
+            amount *= 100000000
+        elif unit in {"万元", "万"}:
+            amount *= 10000
+        output.append({"amount": amount, "start": match.start(), "end": match.end(), "unit": unit})
+    return output
+
+
+def _chinese_number_to_float(text: str) -> float | None:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "壹": 1,
+        "贰": 2,
+        "叁": 3,
+        "肆": 4,
+        "伍": 5,
+        "陆": 6,
+        "柒": 7,
+        "捌": 8,
+        "玖": 9,
+    }
+    units = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
+    section_units = {"万": 10000, "亿": 100000000}
+    total = 0
+    section = 0
+    number = 0
+    seen = False
+    for char in str(text or ""):
+        if char in digits:
+            number = digits[char]
+            seen = True
+        elif char in units:
+            seen = True
+            section += (number or 1) * units[char]
+            number = 0
+        elif char in section_units:
+            seen = True
+            section = (section + number) or 1
+            total += section * section_units[char]
+            section = 0
+            number = 0
+        else:
+            return None
+    if not seen:
+        return None
+    return float(total + section + number)
 
 
 def _extract_ratio(text: str) -> float | None:

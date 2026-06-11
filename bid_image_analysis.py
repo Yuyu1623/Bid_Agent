@@ -4,6 +4,7 @@ import asyncio
 import base64
 import mimetypes
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import List, Optional
@@ -16,10 +17,14 @@ from llm_client import LLM_Invoke
 
 
 class BidImageAnalysisItem(BaseModel):
+    image_id: str = Field(default="", description="Stable image id for metadata and future multimodal embedding.")
     index: int = Field(description="Image order in the document.")
     source: str = Field(description="Image source path inside the document.")
     file_name: str = Field(description="Extracted image file name.")
     image_data_url: str = Field(default="", description="Base64 data URL for image preview.")
+    thumbnail_data_url: str = Field(default="", description="Compressed thumbnail data URL for lightweight preview.")
+    image_ref: str = Field(default="", description="Local image file reference.")
+    has_multimodal_embedding: bool = Field(default=False, description="Whether image embedding has been generated.")
     ocr_text: str = Field(description="OCR text extracted from the image.")
     ai_note: str = Field(description="LLM generated note for the image.")
 
@@ -91,10 +96,14 @@ async def analyze_document_images(
                     ocr_text=ocr_text,
                 )
                 return BidImageAnalysisItem(
+                    image_id=f"img_{index:04d}",
                     index=index,
                     source=image_path.name,
                     file_name=image_path.name,
                     image_data_url=_image_to_data_url(image_path),
+                    thumbnail_data_url=_image_to_thumbnail_data_url(image_path),
+                    image_ref=str(image_path),
+                    has_multimodal_embedding=False,
                     ocr_text=ocr_text,
                     ai_note=ai_note,
                 )
@@ -114,10 +123,12 @@ def format_image_analysis_markdown(items: List[BidImageAnalysisItem]) -> str:
             "\n".join(
                 [
                     f"## 图片 {item.index}",
+                    f"- ID：{item.image_id}",
                     f"- 文件：{item.file_name}",
                     f"- 位置：{item.source}",
+                    f"- 多模态向量：{'已生成' if item.has_multimodal_embedding else '未生成'}",
                     "",
-                    f"![图片 {item.index}]({item.image_data_url})",
+                    f"![图片 {item.index}]({item.thumbnail_data_url or item.image_data_url})",
                     "",
                     "### OCR文本",
                     item.ocr_text or "未识别到文字。",
@@ -244,3 +255,22 @@ def _image_to_data_url(image_path: Path) -> str:
     mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
     encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _image_to_thumbnail_data_url(image_path: Path, max_size: int = 512, quality: int = 75) -> str:
+    try:
+        from PIL import Image
+    except ImportError:
+        return _image_to_data_url(image_path)
+
+    try:
+        with Image.open(image_path) as image:
+            image.thumbnail((max_size, max_size))
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        return _image_to_data_url(image_path)

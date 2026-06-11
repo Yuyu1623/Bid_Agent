@@ -29,6 +29,11 @@ from bid_qualification_prefilter import (
     qualification_prefilter_enabled,
 )
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_rule_extractor import (
+    build_rule_global_context,
+    needs_llm_global_completion,
+    rule_project_overview_markdown,
+)
 from bid_structured_extraction import (
     build_structured_messages,
     parse_structured_json,
@@ -196,18 +201,29 @@ def analyze_bid_document(
             retrieved_sections["qualification_compliance"],
             qualification_prefilter_hits,
         )
+    rule_context = build_rule_global_context(sections)
     try:
-        global_context = llm.think(
-            build_global_context_messages_from_sections(sections),
-            stream=False,
-        ) or ""
-        project_overview = build_project_overview_text_from_global_context(global_context)
+        import json
+
+        rule_payload = json.loads(rule_context)
+        if not needs_llm_global_completion(
+            rule_payload.get("project_profile") or {},
+            rule_payload.get("section_tree") or [],
+        ):
+            global_context = rule_context
+            project_overview = rule_project_overview_markdown(rule_context)
+        else:
+            global_context = llm.think(
+                build_global_context_messages_from_sections(retrieved_sections["project_overview"]),
+                stream=False,
+            ) or ""
+            project_overview = build_project_overview_text_from_global_context(global_context)
     except Exception:
-        global_context = ""
+        global_context = rule_context
         project_overview = llm.think(
             build_project_overview_messages_from_sections(retrieved_sections["project_overview"]),
             stream=stream_output,
-        )
+        ) or rule_project_overview_markdown(rule_context)
     structured_outputs: dict[str, dict] = {}
     if structured_output_enabled():
         try:

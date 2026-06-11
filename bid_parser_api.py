@@ -38,6 +38,11 @@ from bid_qualification_prefilter import (
     qualification_prefilter_enabled,
 )
 from bid_section_retriever import retrieve_sections_for_analysis
+from bid_rule_extractor import (
+    build_rule_global_context,
+    needs_llm_global_completion,
+    rule_project_overview_markdown,
+)
 from bid_structured_extraction import (
     build_structured_messages,
     parse_structured_json,
@@ -280,6 +285,56 @@ async def _run_structured_job_async(
     return markdown, data
 
 
+DISPLAY_MARKDOWN_FIELDS = (
+    "business_content",
+    "technical_scoring_requirements",
+    "qualification_compliance_requirements",
+    "price_scoring_requirements",
+)
+
+
+def _ensure_display_markdown_fields(results: dict) -> None:
+    structured = results.get("structured_extraction") if isinstance(results.get("structured_extraction"), dict) else {}
+    for field in DISPLAY_MARKDOWN_FIELDS:
+        value = results.get(field)
+        markdown = _coerce_field_to_markdown(field, value)
+        if not markdown and structured.get(field):
+            markdown = _coerce_field_to_markdown(field, structured.get(field))
+        if markdown:
+            results[field] = markdown
+
+
+def _coerce_field_to_markdown(field: str, value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return structured_to_markdown(field, value)
+    if isinstance(value, list):
+        return structured_to_markdown(field, _wrap_structured_rows(field, value))
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text[:1] in {"{", "["} or text.startswith("```"):
+        parsed = parse_structured_json(text)
+        if parsed:
+            markdown = structured_to_markdown(field, parsed)
+            if markdown:
+                return markdown
+    return text
+
+
+def _wrap_structured_rows(field: str, rows: list) -> dict:
+    if field == "business_content":
+        return {"business_requirements": rows}
+    if field == "technical_scoring_requirements":
+        return {"technical_requirements": rows}
+    if field == "qualification_compliance_requirements":
+        return {"qualification_requirements": rows, "rejection_items": []}
+    if field == "price_scoring_requirements":
+        return {"scoring_items": rows}
+    return {}
+
+
 def _messages_with_json_only_instruction(messages: list) -> list:
     output = [dict(message) for message in messages]
     output.append(
@@ -297,9 +352,21 @@ def _build_global_context_sync(
     stream_output: bool,
 ) -> tuple[str, str]:
     """Run the first-pass project profile + section tree extraction."""
+    rule_context = build_rule_global_context(sections)
+    try:
+        payload = json.loads(rule_context)
+        if not needs_llm_global_completion(
+            payload.get("project_profile") or {},
+            payload.get("section_tree") or [],
+        ):
+            return rule_context, rule_project_overview_markdown(rule_context)
+    except Exception:
+        pass
     try:
         global_context = llm.think(
-            build_global_context_messages_from_sections(sections),
+            build_global_context_messages_from_sections(
+                retrieve_sections_for_analysis(sections)["project_overview"]
+            ),
             stream=False,
         ) or ""
         project_overview = build_project_overview_text_from_global_context(global_context)
@@ -317,9 +384,21 @@ async def _build_global_context_async(
     sections: List[BidDocumentSection],
 ) -> tuple[str, str]:
     """Async first-pass project profile + section tree extraction."""
+    rule_context = build_rule_global_context(sections)
+    try:
+        payload = json.loads(rule_context)
+        if not needs_llm_global_completion(
+            payload.get("project_profile") or {},
+            payload.get("section_tree") or [],
+        ):
+            return rule_context, rule_project_overview_markdown(rule_context)
+    except Exception:
+        pass
     try:
         global_context = await llm.athink(
-            build_global_context_messages_from_sections(sections),
+            build_global_context_messages_from_sections(
+                retrieve_sections_for_analysis(sections)["project_overview"]
+            ),
             stream=False,
         ) or ""
         project_overview = build_project_overview_text_from_global_context(global_context)
@@ -707,6 +786,21 @@ def vector_search(request: VectorSearchRequest) -> dict:
         )
     except Exception as exc:
         _raise_api_error(exc)
+
+
+@app.get("/projects/{project_id}/bid-outline")
+def get_project_bid_outline(project_id: str) -> dict:
+    try:
+        from bid_outline_generator import generate_bid_outline
+
+        return generate_bid_outline(project_id)
+    except Exception as exc:
+        _raise_api_error(exc)
+
+
+@app.get("/projects/bid-outline/{project_id}")
+def get_project_bid_outline_alias(project_id: str) -> dict:
+    return get_project_bid_outline(project_id)
 
 
 @app.post("/projects/records/{table_name}/{record_id}/confirm")
@@ -1319,6 +1413,7 @@ async def upload_and_analyze_document_stream(
             results["sections"] = [section.model_dump() for section in sections]
             results["content_review_report"] = {}
             results["content_review_markdown"] = "内容审查尚未执行，请在前端点击“执行审查”。"
+            _ensure_display_markdown_fields(results)
             try:
                 db_result = save_analysis_result(
                     sections=results["sections"],
@@ -1520,6 +1615,7 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
             results["sections"] = [section.model_dump() for section in sections]
             results["content_review_report"] = {}
             results["content_review_markdown"] = "内容审查尚未执行，请在前端点击“执行审查”。"
+            _ensure_display_markdown_fields(results)
             try:
                 db_result = save_analysis_result(
                     sections=results["sections"],

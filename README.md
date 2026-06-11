@@ -15,17 +15,18 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
    -> 支持 PDF、Word、图片、HTML 等格式
    -> 识别原生文本、扫描件、图文混排、表格、图片和页段结构
 
+   ** 招标文件切片 **
+   -> RAG 切片不按整章粗切：小表按表格行切片，大表先生成 table_overview，再按每 3 行打包为 table_row_group；列表项、业务条款、段落块和章节摘要继续切成 document_chunks;每个 chunk 携带 hierarchy_path、item_type、parent_table_header、importance_score、module、vector_filter 等 metadata
+
 2. 结构化抽取层 `[已完成基础版，持续增强中]`
    ** 核心目标：把招标文件抽成可入库、可溯源、可检索、可生成的原子数据。 **
-   -> 先抽全局 project_profile 和 section_tree，统一项目基础信息和章节层级，给后续专项抽取提供结构锚点
+   -> 抽取策略：轻量级两阶段抽取 project_profile 和 section_tree；第一阶段用规则、正则、标题样式、编号模式和前几页表格快速生成候选项目基础信息与章节树，第二阶段仅对缺失或不确定字段调用 LLM 补全，并只传局部上下文
    -> 再按模块抽取投标人须知、商务内容、技术要求、资格审查、废标项、评分要求，输出 JSON Schema 结构化对象
    -> 每条原子数据都保留 source_chunk_id、source_text、source_heading、evidence_snippet，方便回查原文和人工复核
    -> 表格清洗为独立业务行：商务条款、技术参数、资格要求、废标情形、评分点分别入库为对应表
-   -> 入库时做基础标准化：金额统一为 CNY 数值，期限统一为日历天数，日期统一为 ISO 格式，风险等级和状态使用 enum
+   -> 入库时做基础标准化：金额统一为 CNY 数值（如 500万元 -> 5000000，不在数值字段里保留“万元/元”），期限统一为日历天数，日期统一为 ISO 格式，风险等级和状态使用 enum
    -> 通过 source_chunk_id 和关键词相似度建立跨模块引用，例如商务要求关联技术要求、评分项，为后续生成检查清单做准备
    -> 资格审查和废标项先用宽关键词、章节标题和规则重排召回疑似片段，再交给轻量模型复核，最后由大模型精提取，兼顾速度、召回率和完整性
-   -> RAG 切片不按整章粗切，而是按表格行、列表项、业务条款、段落块和章节摘要切成 document_chunks
-   -> 每个 chunk 携带 hierarchy_path、item_type、parent_table_header、importance_score、module、vector_filter 等 metadata
    -> 向量索引使用 sentence-transformers 中的 BAAI/bge-large-zh-v1.5 模型，再用 ChromaDB 持久化索引；chunk_embeddings 记录 SQLite chunk 与 Chroma vector_id 的映射，重排模型选用 BAAI/bge-reranker-v2-m3 模型。
 
 3. 知识沉淀层 `[SQLite 基础版完成，Chroma 向量索引基础版已接入]`
@@ -78,13 +79,13 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
       -> 第二层：结构还原层
           -> 尽量保留页码、标题层级、章节、段落、表格、图片说明、页眉页脚线索
           -> 基于 Markdown 标题、font-size/bold 线索、编号模式（一、/ 1. / 1.1）重建标题层级树
-  -> 统一中间格式
-      -> Markdown 正文
-      -> 结构化元数据：标题路径、表格 JSON、图片描述、页码线索
-      -> DOCX 图片元数据挂到相邻章节，而不是孤立输出
-      -> 表格行切片保留 header_paths / cell_header_map，避免两层表头和表内分段丢失语义
-      -> document_chunks metadata 保留 hierarchy_path、item_type、parent_table_header、importance_score 和 vector_filter
-      -> 章节摘要 chunk 作为后续章节级 / 模块级向量检索入口
+  -> 统一中间格式：Markdown 正文 + JSON Schema 结构化元数据
+      -> Markdown 正文：保留原文段落、标题、列表、表格和图片占位，方便人工阅读和后续生成引用
+      -> 章节 JSON：保留 section_id、title、level、hierarchy_path、page_start、page_end、source_text 等结构信息
+      -> 表格 JSON：切片前先处理类合并单元格，再判断大表 / 小表；小表保留逐行语义，大表生成 table_overview 并按每 3 行打包 table_row_group，同时保留 headers、rows、header_paths、cell_header_map、parent_table_header 等表格语义
+      -> 图片 JSON：DOCX / PDF 图片元数据挂到相邻章节，保留 image_id、page、nearby_text、OCR/VLM 描述、签章/签字线索、缩略图/压缩 base64 和 has_multimodal_embedding 标志，后续可接 CLIP 等多模态 embedding 做图文统一检索
+      -> document_chunks metadata：保留 hierarchy_path、item_type、parent_table_header、importance_score、vector_filter，支撑后续 RAG 过滤和排序
+      -> 章节摘要 chunk：作为章节级 / 模块级向量检索入口，metadata 中通过 vector_role=section_summary、summary_of=section_id 与普通 chunk 区分；检索时先用摘要 chunk 路由到相关章节，再优先返回该章节下的子 chunk，避免摘要本身和正文重复抢答案
   -> 模块候选片段召回
       -> 宽关键词召回
       -> 模块语义 query 召回，如商务要求使用“付款方式、合同价款、履约保证金、质保金、发票要求”等查询描述
@@ -122,8 +123,21 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 - **结构化抽取**：先生成项目画像和章节树，再抽取投标人须知、商务内容、技术要求、资格审查、废标项和评分要求；结果按 JSON Schema 输出为可入库的原子条目。
 - **前端展示与编辑**：按五大模块展示解析结果，支持 Markdown 表格渲染、图片卡片展示、字段编辑和重新分析；投标人须知包含各种时间安排、暗标、代理商投标、联合体投标等按钮字段。
 - **项目库与知识库**：解析结果写入 SQLite，可查看项目、章节、切片、条款、评分点和审查发现；知识库支持公司信息、资质、人员、财务、业绩、历史案例、历史投标文件和方案素材管理。
-- **RAG 检索**：document_chunks 按表格行、列表项、业务条款、段落块和章节摘要切片；使用 `BAAI/bge-large-zh-v1.5` 生成 Chroma 向量索引，并用 `BAAI/bge-reranker-v2-m3` 重排；项目库内置智能检索入口，可按当前项目召回原文证据、章节路径、chunk_id 和 metadata。
+- **RAG 检索**：document_chunks 按小表表格行、大表 table_overview / table_row_group、列表项、业务条款、段落块、图片证据和章节摘要切片；关键词召回使用 SQLite FTS5 + BM25，未命中时回退到轻量关键词计分；语义召回使用 `BAAI/bge-large-zh-v1.5` 生成 Chroma 向量索引，并用 `BAAI/bge-reranker-v2-m3` 重排；项目库内置智能检索入口，可按当前项目召回原文证据、章节路径、chunk_id 和 metadata。
+- **标书生成辅助**：项目库内置“标书目录生成”浮层，可根据招标文件编制要求、资格条件、商务要求、技术要求、评分项和废标风险自动生成 Markdown 目录建议。
+- **生成主流程**：招标解析核对完成后直接进入“标书生成工作台”，第一步生成标书目录；生成依据与目录草稿分区展示，目录草稿支持用户直接编辑，后续按编辑后的目录逐章填充正文并汇总导出。
 - **审查与运维**：支持手动执行内容审查，回查原文证据并识别缺失、矛盾和废标风险；Electron 可自动启动 FastAPI 后端，并通过 `/health` 做端口和连通性检查。
+
+### 关于chunk的补充
+- 段落块： 这是最基础的。遇到两个换行符或标题标记，切出一个带标题层级（如 heading_1）的段落 Chunk。
+- 表格行（小表）： 如果表格行数 ≤ 设定阈值（如 10行），把整张表缩成一行 JSON/Markdown 表格文本作为一个 Chunk，以便同时看到表头和数据。
+- 表格概览/行组（大表）：
+  table_overview：只提取表头+前几行+后几行，生成摘要描述。
+  table_row_group：把大表按每5行一组切开，每个 Chunk 携带表头重复，确保上下文完整。
+- 列表项： 被识别为无序/有序列表的，每个 li 可以独立成 Chunk，同时记录它属于哪个父列表。
+- 业务条款： 针对合同/标书，用正则或模板识别类似“第X条”的文本块，精确切分。
+- 图片证据： 图片本身不进文本库，但会生成一个特殊的 Chunk，内容可能是图片 OCR 文字或图片描述（可用多模态模型生成），metadata 记下图片的相对路径/对象存储键。
+- 章节摘要： 按标题层级（如 ## 第三章）合并下属所有块，调用一次 LLM 生成该章节的摘要，存入一个独立的摘要 Chunk，用于高层级的聚合语义匹配。
 
 ## Chroma 向量索引
 
@@ -189,7 +203,6 @@ POST http://127.0.0.1:8000/vector/search
 ├── plan_and_solve_agent.py    # Plan-and-Solve Agent 逻辑
 ├── run_plan_and_solve.py      # 命令行入口
 ├── requirements.txt           # Python 依赖
-├── MINERU_LOCAL_DEPLOY.md     # MinerU 本地部署说明
 ├── DATABASE_SCHEMA_DESIGN.md  # 招投标智能体数据库表设计
 ├── docs/
 │   └── 招投标智能体数据库表结构.xlsx  # 当前 SQLite 表结构 Excel
@@ -212,7 +225,6 @@ POST http://127.0.0.1:8000/vector/search
 - npm
 - 可用的大模型 API Key
 - 如使用 MinerU API，需要 MinerU API Token
-- 如使用本地 MinerU Pipeline，需要本机可运行 MinerU CLI
 - 如使用 Tesseract OCR，需要本机安装 Tesseract
 
 ## 安装 Python 依赖
@@ -459,7 +471,6 @@ auto                  自动推荐解析方式
 mineru_vlm            MinerU VLM
 mineru_pipeline       MinerU Pipeline
 mineru_html           MinerU-HTML
-mineru_local_pipeline 本地 MinerU Pipeline
 mineru_parallel_pages MinerU 并行页段解析
 pymupdf4llm           PyMuPDF4LLM 快速 PDF 解析
 docling               Docling 结构化 PDF 解析
@@ -507,7 +518,7 @@ MINERU_PARALLEL_MAX_WORKERS=3
 4. 专项抽取默认使用 JSON Schema 结构化输出。每个原子条目都要求带 `source_chunk_id`、`source_text`、`source_heading` 和 `evidence_snippet`，其中 `source_chunk_id` 来自候选片段里的来源标记，`source_text` 用于人工复核和 golden evidence 测试。
 5. Schema 中对关键枚举值做归一化：风险等级为 `高/中/低/未明确`，废标法律性质为 `资格性/符合性/响应性/其他`，审查状态为 `open/resolved/ignored`，评分类型为 `商务评分/技术评分/价格评分/其他`。
 
-每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免多个模块反复读取整份长文档。召回策略采用“宽关键词 + 章节标题 + 模块语义 query + 规则重排”的混合检索基础版，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。后续可以在 `document_chunks` 上提前生成 embedding，接入 Chroma / FAISS / Qdrant 后，将模块 query 的向量召回与规则召回融合，再做双向排序。
+每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免多个模块反复读取整份长文档。召回策略采用“SQLite FTS5 + BM25 关键词召回、章节标题加权、模块语义 query、Chroma 向量召回、reranker 重排”的混合检索；未启用 FTS5 或无命中时，会回退到轻量关键词计分，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。
 
 默认上下文参数：
 
@@ -725,22 +736,6 @@ LLM_STREAM_MAX_CONCURRENCY=4
 - 需要本地试验更快或更强结构化效果时，可以手动试 `pymupdf4llm` 或 `docling`。
 - 大文件可以先填写页码范围做小范围测试，再解析整份文件。
 - 如果 MinerU 限流或速度较慢，可以适当降低 `MINERU_PARALLEL_MAX_WORKERS`。
-
-## MinerU 本地部署
-
-项目支持本地 MinerU Pipeline。详细安装和配置见：
-
-```text
-MINERU_LOCAL_DEPLOY.md
-```
-
-如果后端找不到 `mineru` 命令，可以在 `.env` 中配置本地命令路径：
-
-```env
-MINERU_LOCAL_COMMAND=C:\path\to\mineru.exe
-```
-
-本地路径属于个人配置，不要提交到 GitHub。
 
 ## 打包桌面端
 

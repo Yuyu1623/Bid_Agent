@@ -343,33 +343,23 @@ def _search_project_chunks_sqlite_fallback(
     top_k: int,
     reason: str,
 ) -> dict[str, Any]:
-    chunks = _load_chunks_for_search(project_id=project_id, db_path=DB_PATH)
-    terms = _query_terms(query)
-    scored: list[dict[str, Any]] = []
-    for chunk in chunks:
-        metadata = _chroma_metadata(chunk)
-        if module and metadata.get("module") != module:
-            continue
-        if item_type and metadata.get("item_type") != item_type:
-            continue
-        document = _chunk_document(chunk)
-        score = _lexical_score(query=query, terms=terms, document=document, metadata=metadata)
-        if score <= 0:
-            continue
-        scored.append(
-            {
-                "rank": 0,
-                "vector_id": "",
-                "chunk_id": metadata.get("chunk_id"),
-                "distance": None,
-                "rerank_score": score,
-                "document": document,
-                "metadata": metadata,
-            }
+    results = _search_project_chunks_fts(
+        query,
+        project_id=project_id,
+        module=module,
+        item_type=item_type,
+        top_k=top_k,
+    )
+    if not results:
+        results = _search_project_chunks_count_candidates(
+            query,
+            project_id=project_id,
+            module=module,
+            item_type=item_type,
+            top_k=top_k,
         )
-
-    scored.sort(key=lambda item: item.get("rerank_score", 0.0), reverse=True)
-    results = scored[: max(1, top_k)]
+    for item in results:
+        item["rerank_score"] = item.get("lexical_score", item.get("rerank_score", 0.0))
     for index, item in enumerate(results, start=1):
         item["rank"] = index
     return {
@@ -385,6 +375,110 @@ def _search_project_chunks_sqlite_fallback(
 
 
 def _search_project_chunks_sqlite_candidates(
+    query: str,
+    *,
+    project_id: str | None,
+    module: str | None,
+    item_type: str | None,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    fts_results = _search_project_chunks_fts(
+        query,
+        project_id=project_id,
+        module=module,
+        item_type=item_type,
+        top_k=top_k,
+    )
+    if fts_results:
+        return fts_results
+    return _search_project_chunks_count_candidates(
+        query,
+        project_id=project_id,
+        module=module,
+        item_type=item_type,
+        top_k=top_k,
+    )
+
+
+def _search_project_chunks_fts(
+    query: str,
+    *,
+    project_id: str | None,
+    module: str | None,
+    item_type: str | None,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    match_query = _fts_match_query(query)
+    if not match_query:
+        return []
+    init_database(DB_PATH)
+    import sqlite3
+
+    where = ["document_chunks_fts match ?"]
+    params: list[Any] = [match_query]
+    if project_id:
+        where.append("document_chunks_fts.project_id = ?")
+        params.append(project_id)
+    if module:
+        where.append("document_chunks_fts.module = ?")
+        params.append(module)
+    if item_type:
+        where.append("document_chunks_fts.item_type = ?")
+        params.append(item_type)
+    params.append(max(1, top_k))
+
+    sql = f"""
+        select c.*, bm25(document_chunks_fts) as bm25_score
+        from document_chunks_fts
+        join document_chunks c on c.id = document_chunks_fts.chunk_id
+        where {' and '.join(where)}
+        order by bm25_score asc
+        limit ?
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    output: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        chunk = dict(row)
+        metadata = _chroma_metadata(chunk)
+        document = _chunk_document(chunk)
+        rank_score = 1.0 / index
+        rank_score *= float(metadata.get("importance_score") or 1.0)
+        output.append(
+            {
+                "rank": 0,
+                "vector_id": "",
+                "chunk_id": metadata.get("chunk_id"),
+                "distance": None,
+                "lexical_score": rank_score,
+                "bm25_score": float(chunk.get("bm25_score") or 0.0),
+                "document": document,
+                "metadata": metadata,
+                "source": "sqlite_fts5",
+            }
+        )
+    return output
+
+
+def _fts_match_query(query: str) -> str:
+    terms = _query_terms(query)
+    if not terms:
+        return ""
+    return " OR ".join(f'"{_escape_fts_term(term)}"' for term in terms if _escape_fts_term(term))
+
+
+def _escape_fts_term(term: str) -> str:
+    return str(term or "").replace('"', '""').strip()
+
+
+def _search_project_chunks_count_candidates(
     query: str,
     *,
     project_id: str | None,
@@ -456,6 +550,7 @@ def _merge_hybrid_results(
     vector_results: list[dict[str, Any]],
     top_k: int,
 ) -> list[dict[str, Any]]:
+    routed_section_ids = _routed_section_ids([*lexical_results, *vector_results])
     lexical_max = max([float(item.get("lexical_score") or 0.0) for item in lexical_results] or [1.0])
     vector_scores = [_vector_relevance_score(item) for item in vector_results]
     vector_max = max(vector_scores or [1.0])
@@ -484,13 +579,51 @@ def _merge_hybrid_results(
             merged[key] = enriched
 
     ranked = sorted(
-        merged.values(),
+        (_apply_summary_route_boost(item, routed_section_ids) for item in merged.values()),
         key=lambda item: float(item.get("hybrid_score") or 0.0),
         reverse=True,
-    )[: max(1, top_k)]
+    )
+    filtered = [
+        item
+        for item in ranked
+        if str((item.get("metadata") or {}).get("vector_role") or "") != "section_summary"
+    ]
+    if not filtered:
+        filtered = ranked
+    ranked = filtered[: max(1, top_k)]
     for index, item in enumerate(ranked, start=1):
         item["rank"] = index
     return ranked
+
+
+def _routed_section_ids(results: list[dict[str, Any]]) -> set[str]:
+    section_ids: set[str] = set()
+    for item in results:
+        metadata = item.get("metadata") or {}
+        if str(metadata.get("vector_role") or "") != "section_summary":
+            continue
+        summary_of = str(metadata.get("summary_of") or metadata.get("section_id") or "").strip()
+        if summary_of:
+            section_ids.add(summary_of)
+    return section_ids
+
+
+def _apply_summary_route_boost(item: dict[str, Any], routed_section_ids: set[str]) -> dict[str, Any]:
+    if not routed_section_ids:
+        return item
+    metadata = item.get("metadata") or {}
+    if str(metadata.get("vector_role") or "") == "section_summary":
+        item["summary_route_only"] = True
+        return item
+    section_id = str(metadata.get("section_id") or "").strip()
+    if section_id and section_id in routed_section_ids:
+        item["hybrid_score"] = float(item.get("hybrid_score") or 0.0) + 0.18
+        sources = list(item.get("match_sources") or [])
+        if "章节摘要路由" not in sources:
+            sources.append("章节摘要路由")
+        item["match_sources"] = sources
+        item["routed_by_summary"] = True
+    return item
 
 
 def _vector_relevance_score(item: dict[str, Any]) -> float:
@@ -591,6 +724,9 @@ def _chroma_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
         "title_path": str(chunk.get("title_path") or ""),
         "parent_table_header": str(metadata.get("parent_table_header") or ""),
         "importance_score": float(metadata.get("importance_score") or 1.0),
+        "vector_role": str(metadata.get("vector_role") or ""),
+        "summary_of": str(metadata.get("summary_of") or ""),
+        "summary_scope": str(metadata.get("summary_scope") or ""),
         "page_start": int(chunk.get("page_start") or 0),
         "page_end": int(chunk.get("page_end") or 0),
     }

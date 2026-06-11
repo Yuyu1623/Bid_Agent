@@ -110,7 +110,6 @@
                 <option value="mineru_pipeline">MinerU Pipeline 模型</option>
                 <option value="mineru_html">MinerU-HTML 模型</option>
                 <option value="mineru_parallel_pages">MinerU 并行页段</option>
-                <option value="mineru_local_pipeline">本地 MinerU Pipeline</option>
                 <option value="pymupdf4llm">PyMuPDF4LLM 快速 PDF</option>
                 <option value="docling">Docling 结构化 PDF</option>
                 <option value="pdfplumber">本地 pdfplumber PDF</option>
@@ -201,6 +200,61 @@
             <section>
               <strong>终稿组装</strong>
               <span>预留 Word / PDF 导出与模板套版入口。</span>
+            </section>
+          </div>
+        </section>
+
+        <section id="bidGenerationWorkspace" class="bid-generation-workspace hidden">
+          <header class="knowledge-header">
+            <div>
+              <p class="step-kicker">BID GENERATION</p>
+              <h2>标书生成工作台</h2>
+              <span>从招标解析结果进入目录生成，再按章节逐步填充正文。</span>
+            </div>
+            <div class="knowledge-actions">
+              <button id="generationOutlineBtn" class="ghost-btn" type="button">生成目录</button>
+              <button id="generationOutlineCopyBtn" class="ghost-btn" type="button">复制</button>
+              <button id="generationOutlineExportBtn" class="ghost-btn" type="button">导出</button>
+            </div>
+          </header>
+
+          <div class="generation-workbench">
+            <aside class="generation-side">
+              <button class="generation-step active" type="button" data-generation-stage="outline">
+                <strong>1. 目录生成</strong>
+                <span>根据招标文件编制要求生成目录</span>
+              </button>
+              <button class="generation-step" type="button" data-generation-stage="sections">
+                <strong>2. 章节填充</strong>
+                <span>按目录逐节生成正文</span>
+              </button>
+              <button class="generation-step" type="button" data-generation-stage="assemble">
+                <strong>3. 汇总导出</strong>
+                <span>汇总标书初稿并导出</span>
+              </button>
+            </aside>
+            <section class="generation-main">
+              <div class="generation-toolbar">
+                <div>
+                  <h3>标书目录生成</h3>
+                  <p id="generationProjectHint">完成招标解析后，将自动带入当前项目。</p>
+                </div>
+                <select id="generationProjectSelect" title="选择生成项目">
+                  <option value="">当前解析项目</option>
+                </select>
+              </div>
+              <div class="generation-outline-layout">
+                <section class="generation-evidence-panel">
+                  <h4>生成依据</h4>
+                  <div id="generationEvidenceOutput" class="generation-evidence-output">
+                    核对完成后，系统会在这里展示本次目录生成使用的项目、资格、商务、技术、评分和编制要求线索。
+                  </div>
+                </section>
+                <section class="generation-outline-panel">
+                  <h4>目录草稿</h4>
+                  <textarea id="generationOutlineEditor" class="generation-outline-editor" placeholder="点击“生成目录”后，可在这里直接修改标书目录。"></textarea>
+                </section>
+              </div>
             </section>
           </div>
         </section>
@@ -315,6 +369,22 @@
                 </div>
               </div>
               <div id="projectSummary" class="project-summary"></div>
+              <button id="projectOutlineFloatBtn" class="project-outline-float-btn" type="button" title="标书目录">目录</button>
+              <section id="projectOutlinePanel" class="project-outline-panel floating" aria-hidden="true">
+                <div class="project-rag-head">
+                  <div>
+                    <h4>标书目录生成</h4>
+                    <p>根据招标文件编制要求、资格条件、商务要求、技术要求和评分项自动生成目录建议。</p>
+                  </div>
+                  <div class="project-rag-actions">
+                    <button id="projectOutlineGenerateBtn" class="ghost-btn" type="button">生成</button>
+                    <button id="projectOutlineCopyBtn" class="ghost-btn" type="button">复制</button>
+                    <button id="projectOutlineExportBtn" class="ghost-btn" type="button">导出</button>
+                    <button id="projectOutlineCloseBtn" class="ghost-btn" type="button">关闭</button>
+                  </div>
+                </div>
+                <div id="projectOutlineOutput" class="project-outline-output">选择项目后，点击“生成”自动生成标书目录建议。</div>
+              </section>
               <button id="projectRagFloatBtn" class="project-rag-float-btn" type="button" title="智能检索">检索</button>
               <section id="projectRagPanel" class="project-rag-panel floating">
                 <div class="project-rag-head">
