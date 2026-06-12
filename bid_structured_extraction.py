@@ -19,7 +19,14 @@ FIELD_TO_SCHEMA_KEY = {
 
 
 def structured_output_enabled() -> bool:
-    return os.getenv("BID_STRUCTURED_OUTPUT_ENABLED", "true").lower() not in {
+    if os.getenv("BID_FAST_MARKDOWN_EXTRACTION", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+    return os.getenv("BID_STRUCTURED_OUTPUT_ENABLED", "false").lower() not in {
         "0",
         "false",
         "no",

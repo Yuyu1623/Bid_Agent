@@ -194,6 +194,133 @@ def _build_analysis_jobs(
     return jobs
 
 
+MODULE_FALLBACK_CONFIG = {
+    "business_content": {
+        "retrieval_key": "business_content",
+        "title": "商务内容",
+        "empty": "未从候选章节中召回到明确商务内容。",
+    },
+    "technical_scoring_requirements": {
+        "retrieval_key": "technical_requirements",
+        "title": "技术要求",
+        "empty": "未从候选章节中召回到明确技术要求。",
+    },
+    "qualification_compliance_requirements": {
+        "retrieval_key": "qualification_compliance",
+        "title": "资格审查与废标项",
+        "empty": "未从候选章节中召回到明确资格审查、符合性审查或废标项。",
+    },
+    "price_scoring_requirements": {
+        "retrieval_key": "scoring",
+        "title": "评分要求",
+        "empty": "未从候选章节中召回到明确评分要求。",
+    },
+}
+
+
+def _apply_local_module_fallbacks(
+    results: dict,
+    sections: List[BidDocumentSection],
+    qualification_prefilter_sections: Optional[List[BidDocumentSection]] = None,
+) -> dict:
+    """Fill empty module outputs with local retrieved snippets so the UI is never blank."""
+    retrieved_sections = retrieve_sections_for_analysis(sections)
+    if qualification_prefilter_sections:
+        retrieved_sections["qualification_compliance"] = merge_qualification_prefilter_sections(
+            retrieved_sections["qualification_compliance"],
+            qualification_prefilter_sections,
+        )
+    for field, config in MODULE_FALLBACK_CONFIG.items():
+        value = str(results.get(field) or "").strip()
+        if value and "提取失败" not in value[:80]:
+            continue
+        module_sections = retrieved_sections.get(config["retrieval_key"], [])
+        results[field] = _format_local_module_fallback(
+            field=field,
+            title=config["title"],
+            sections=module_sections,
+            empty_message=config["empty"],
+        )
+    return results
+
+
+def _format_local_module_fallback(
+    field: str,
+    title: str,
+    sections: List[BidDocumentSection],
+    empty_message: str,
+    max_sections: int = 6,
+    max_chars_per_section: int = 1200,
+) -> str:
+    snippets = []
+    for section in sections[:max_sections]:
+        section_title = str(getattr(section, "title", "") or "候选片段").strip()
+        text = str(
+            getattr(section, "markdown", "")
+            or getattr(section, "content", "")
+            or ""
+        ).strip()
+        if not text:
+            continue
+        text = text[:max_chars_per_section].rstrip()
+        snippets.append((section_title, text))
+
+    if not snippets:
+        return f"## {title}\n\n{empty_message}"
+
+    if field == "qualification_compliance_requirements":
+        lines = [
+            "## 资格性审查",
+            "| 序号 | 资格要求 | 需提供资料 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 符合性审查",
+            "| 序号 | 资格要求 | 需提供资料 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 废标项",
+            "| 序号 | 废标项 | 具体表现 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 本地召回候选片段",
+        ]
+    elif field == "price_scoring_requirements":
+        lines = [
+            "## 商务评分",
+            "| 评分项 | 评分标准 | 分数 |",
+            "| --- | --- | --- |",
+            "| 见下方本地召回候选片段 | 请人工核对评分表后再生成投标文件 | 未明确 |",
+            "",
+            "## 技术评分",
+            "| 评分项 | 评分标准 | 分数 |",
+            "| --- | --- | --- |",
+            "| 见下方本地召回候选片段 | 请人工核对评分表后再生成投标文件 | 未明确 |",
+            "",
+            "## 本地召回候选片段",
+        ]
+    else:
+        lines = [
+            f"# {title}",
+            "",
+            "> 大模型未返回有效内容，以下为后端按宽关键词和章节标题召回的候选原文片段。",
+            "",
+        ]
+
+    for index, (section_title, text) in enumerate(snippets, start=1):
+        lines.extend(
+            [
+                f"### 候选片段 {index}：{section_title}",
+                "",
+                text,
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
 def _build_structured_analysis_jobs(
     sections: List[BidDocumentSection],
     global_context: str = "",
@@ -1376,6 +1503,11 @@ async def upload_and_analyze_document_stream(
                             content=results[field],
                         )
 
+            results = _apply_local_module_fallbacks(
+                results,
+                sections,
+                qualification_prefilter_hits,
+            )
             results = clean_analysis_dict(results)
             for field, label, _ in jobs:
                 if results.get(field):
@@ -1602,6 +1734,11 @@ async def analyze_edited_content_stream(request: AnalyzeContentRequest) -> Strea
                         content=results[field],
                     )
 
+            results = _apply_local_module_fallbacks(
+                results,
+                sections,
+                qualification_prefilter_hits,
+            )
             results = clean_analysis_dict(results)
             for field, label, _ in jobs:
                 if results.get(field):

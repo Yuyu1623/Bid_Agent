@@ -143,6 +143,98 @@ def _run_structured_job(
     return markdown, data
 
 
+MODULE_FALLBACK_CONFIG = {
+    "business_content": ("business_content", "商务内容", "未从候选章节中召回到明确商务内容。"),
+    "technical_scoring_requirements": ("technical_requirements", "技术要求", "未从候选章节中召回到明确技术要求。"),
+    "qualification_compliance_requirements": (
+        "qualification_compliance",
+        "资格审查与废标项",
+        "未从候选章节中召回到明确资格审查、符合性审查或废标项。",
+    ),
+    "price_scoring_requirements": ("scoring", "评分要求", "未从候选章节中召回到明确评分要求。"),
+}
+
+
+def _apply_local_module_fallbacks(
+    results: dict,
+    retrieved_sections: dict,
+) -> dict:
+    for field, (retrieval_key, title, empty_message) in MODULE_FALLBACK_CONFIG.items():
+        value = str(results.get(field) or "").strip()
+        if value and "提取失败" not in value[:80]:
+            continue
+        results[field] = _format_local_module_fallback(
+            field,
+            title,
+            retrieved_sections.get(retrieval_key, []),
+            empty_message,
+        )
+    return results
+
+
+def _format_local_module_fallback(
+    field: str,
+    title: str,
+    sections: list[BidDocumentSection],
+    empty_message: str,
+    max_sections: int = 6,
+    max_chars_per_section: int = 1200,
+) -> str:
+    snippets = []
+    for section in sections[:max_sections]:
+        section_title = str(getattr(section, "title", "") or "候选片段").strip()
+        text = str(getattr(section, "markdown", "") or getattr(section, "content", "") or "").strip()
+        if text:
+            snippets.append((section_title, text[:max_chars_per_section].rstrip()))
+    if not snippets:
+        return f"## {title}\n\n{empty_message}"
+
+    if field == "qualification_compliance_requirements":
+        lines = [
+            "## 资格性审查",
+            "| 序号 | 资格要求 | 需提供资料 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 符合性审查",
+            "| 序号 | 资格要求 | 需提供资料 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 废标项",
+            "| 序号 | 废标项 | 具体表现 |",
+            "| --- | --- | --- |",
+            "| 1 | 见下方本地召回候选片段，请人工核对后再生成投标文件 | 未明确 |",
+            "",
+            "## 本地召回候选片段",
+        ]
+    elif field == "price_scoring_requirements":
+        lines = [
+            "## 商务评分",
+            "| 评分项 | 评分标准 | 分数 |",
+            "| --- | --- | --- |",
+            "| 见下方本地召回候选片段 | 请人工核对评分表后再生成投标文件 | 未明确 |",
+            "",
+            "## 技术评分",
+            "| 评分项 | 评分标准 | 分数 |",
+            "| --- | --- | --- |",
+            "| 见下方本地召回候选片段 | 请人工核对评分表后再生成投标文件 | 未明确 |",
+            "",
+            "## 本地召回候选片段",
+        ]
+    else:
+        lines = [
+            f"# {title}",
+            "",
+            "> 大模型未返回有效内容，以下为后端按宽关键词和章节标题召回的候选原文片段。",
+            "",
+        ]
+
+    for index, (section_title, text) in enumerate(snippets, start=1):
+        lines.extend([f"### 候选片段 {index}：{section_title}", "", text, ""])
+    return "\n".join(lines).strip()
+
+
 def analyze_bid_document(
     document: str,
     output_dir: Optional[str] = None,
@@ -336,6 +428,20 @@ def analyze_bid_document(
                 stream=stream_output,
             )
             price_scoring_requirements = llm.think(messages_batch[3], stream=stream_output)
+
+    module_results = _apply_local_module_fallbacks(
+        {
+            "business_content": business_content,
+            "technical_scoring_requirements": technical_scoring_requirements,
+            "qualification_compliance_requirements": qualification_compliance_requirements,
+            "price_scoring_requirements": price_scoring_requirements,
+        },
+        retrieved_sections,
+    )
+    business_content = module_results["business_content"]
+    technical_scoring_requirements = module_results["technical_scoring_requirements"]
+    qualification_compliance_requirements = module_results["qualification_compliance_requirements"]
+    price_scoring_requirements = module_results["price_scoring_requirements"]
 
     image_analysis_markdown = ""
     image_analysis_items = []

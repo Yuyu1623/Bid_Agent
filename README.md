@@ -4,6 +4,42 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 
 本仓库会持续更新。`.env` 中的 API Key、Token、本地路径等个人配置不公开，请使用 `.env.example` 作为配置模板。
 
+## 下载后快速启动
+
+Windows 用户下载或解压项目后，推荐直接双击项目根目录下的：
+
+```text
+run.bat
+```
+
+也可以双击：
+
+```text
+start_dowell.bat
+```
+
+启动脚本会自动完成以下事情：
+
+```text
+1. 检查项目目录
+2. 创建本地 Python 虚拟环境 .venv
+3. 根据 requirements.txt 安装后端依赖
+4. 根据 electron_client/package.json 安装前端依赖
+5. 启动 FastAPI 后端服务
+6. 打开 Electron 前端界面
+```
+
+首次启动需要联网安装依赖，可能需要几分钟；第二次启动会复用已安装的 `.venv` 和 `node_modules`，速度会快很多。脚本会把启动日志写入 `logs/startup.log`，后端日志写入 `logs/backend.out.log` 和 `logs/backend.err.log`。
+
+如果脚本提示找不到 Python 或 Node.js，请先安装：
+
+- Python 3.10、3.11 或 3.12
+- Node.js LTS
+
+不建议使用 Python 3.13 / 3.14。Windows 上很多依赖包（如 numpy、OCR、向量检索相关包）可能没有对应版本的预编译 wheel，会触发本地编译并导致安装失败。启动脚本会优先查找 Python 3.12 / 3.11 / 3.10；如果发现项目 `.venv` 是 Python 3.13 / 3.14，会自动重建虚拟环境。
+
+敏感配置仍然放在 `.env`，不要提交到 GitHub。可以复制 `.env.example` 后填写自己的 API Key、模型地址和 MinerU Token。
+
 ## 招投标智能体能力设计
 
 项目整体按六层能力建设，目标是从“文件读懂”逐步扩展到“投标生成、审查和辅助决策”：
@@ -21,7 +57,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 2. 结构化抽取层 `[已完成基础版，持续增强中]`
    ** 核心目标：把招标文件抽成可入库、可溯源、可检索、可生成的原子数据。 **
    -> 抽取策略：轻量级两阶段抽取 project_profile 和 section_tree；第一阶段用规则、正则、标题样式、编号模式和前几页表格快速生成候选项目基础信息与章节树，第二阶段仅对缺失或不确定字段调用 LLM 补全，并只传局部上下文
-   -> 再按模块抽取投标人须知、商务内容、技术要求、资格审查、废标项、评分要求，输出 JSON Schema 结构化对象
+   -> 再按模块抽取投标人须知、商务内容、技术要求、资格审查、废标项、评分要求；默认使用 Markdown 快速抽取，JSON Schema 结构化抽取作为可选增强
    -> 每条原子数据都保留 source_chunk_id、source_text、source_heading、evidence_snippet，方便回查原文和人工复核
    -> 表格清洗为独立业务行：商务条款、技术参数、资格要求、废标情形、评分点分别入库为对应表
    -> 入库时做基础标准化：金额统一为 CNY 数值（如 500万元 -> 5000000，不在数值字段里保留“万元/元”），期限统一为日历天数，日期统一为 ISO 格式，风险等级和状态使用 enum
@@ -43,7 +79,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
    -> 生成商务标、技术标、响应表、偏离表
    -> 生成审查报告、风险报告、投标决策建议
 
-5. 审查层 `[部分完成]`
+5. 审查层 `[部分完成]`wiki
    -> 检查合规性、完整性、一致性
    -> 检查响应偏离、漏项、矛盾项和废标风险
    -> 使用正则、宽关键词回查、原文证据片段和提取结果溯源辅助核验
@@ -98,7 +134,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
       -> 第 1 步：商务内容、技术要求、资格审查、评分要求四路专项并发
       -> 专项 Prompt 携带 project_profile 和 section_tree，并禁止改写项目基本信息
       -> 资格审查专项前，后台自动调用轻量模型逐章预筛“疑似资格审查 / 符合性审查 / 废标或否决投标”段落
-      -> 专项模块默认按 JSON Schema 输出结构化对象，再转换为 Markdown 表格展示
+      -> 专项模块默认按 Markdown 快速输出并直接展示；需要强结构化入库时，可开启 JSON Schema 输出后再转换为 Markdown 表格展示
       -> 每个原子对象强制携带 source_chunk_id 和 source_text，风险等级、状态、评分类型、废标法律性质等字段使用 enum 归一化
   -> 输出质量后处理
       -> 表格行去重
@@ -120,7 +156,7 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 ## 功能概览
 
 - **文件解析**：支持 PDF、Word、图片、HTML；自动判断原生文本、扫描件、图文混排和表格/图片内容，按文件特征选择 pdfplumber、MinerU、OCR、docx2python 等解析方式。
-- **结构化抽取**：先生成项目画像和章节树，再抽取投标人须知、商务内容、技术要求、资格审查、废标项和评分要求；结果按 JSON Schema 输出为可入库的原子条目。
+- **结构化抽取**：先生成项目画像和章节树，再抽取投标人须知、商务内容、技术要求、资格审查、废标项和评分要求；默认走 Markdown 快速抽取，抽取为空时会回退到本地候选片段展示，JSON Schema 可按需开启。
 - **前端展示与编辑**：按五大模块展示解析结果，支持 Markdown 表格渲染、图片卡片展示、字段编辑和重新分析；投标人须知包含各种时间安排、暗标、代理商投标、联合体投标等按钮字段。
 - **项目库与知识库**：解析结果写入 SQLite，可查看项目、章节、切片、条款、评分点和审查发现；知识库支持公司信息、资质、人员、财务、业绩、历史案例、历史投标文件和方案素材管理。
 - **RAG 检索**：document_chunks 按小表表格行、大表 table_overview / table_row_group、列表项、业务条款、段落块、图片证据和章节摘要切片；关键词召回使用 SQLite FTS5 + BM25，未命中时回退到轻量关键词计分；语义召回使用 `BAAI/bge-large-zh-v1.5` 生成 Chroma 向量索引，并用 `BAAI/bge-reranker-v2-m3` 重排；项目库内置智能检索入口，可按当前项目召回原文证据、章节路径、chunk_id 和 metadata。
@@ -129,15 +165,60 @@ Dowell 投标工具箱是一个面向招标文件解析、核对和标书生成�
 - **审查与运维**：支持手动执行内容审查，回查原文证据并识别缺失、矛盾和废标风险；Electron 可自动启动 FastAPI 后端，并通过 `/health` 做端口和连通性检查。
 
 ### 关于chunk的补充
-- 段落块： 这是最基础的。遇到两个换行符或标题标记，切出一个带标题层级（如 heading_1）的段落 Chunk。
-- 表格行（小表）： 如果表格行数 ≤ 设定阈值（如 10行），把整张表缩成一行 JSON/Markdown 表格文本作为一个 Chunk，以便同时看到表头和数据。
-- 表格概览/行组（大表）：
-  table_overview：只提取表头+前几行+后几行，生成摘要描述。
-  table_row_group：把大表按每5行一组切开，每个 Chunk 携带表头重复，确保上下文完整。
-- 列表项： 被识别为无序/有序列表的，每个 li 可以独立成 Chunk，同时记录它属于哪个父列表。
-- 业务条款： 针对合同/标书，用正则或模板识别类似“第X条”的文本块，精确切分。
-- 图片证据： 图片本身不进文本库，但会生成一个特殊的 Chunk，内容可能是图片 OCR 文字或图片描述（可用多模态模型生成），metadata 记下图片的相对路径/对象存储键。
-- 章节摘要： 按标题层级（如 ## 第三章）合并下属所有块，调用一次 LLM 生成该章节的摘要，存入一个独立的摘要 Chunk，用于高层级的聚合语义匹配。
+- 章节摘要： 按标题层级（如 ## 第三章）合并下属所有块，调用一次 LLM 生成该章节的摘要，存入一个独立的摘要 Chunk，用于高层级的聚合语义匹配，并记录元数据信息（切片类型、章节id等）
+- 表格切片： 先处理类合并单元格，生成header_path以及cell_header_map，然后对小表逐行切，每一行生成一个 chunk，metadata会带如下例信息：
+{
+  "cells": ["项目实施方案", "方案完整性", "10分"],
+  "header_paths": ["评分项", "评分标准", "分值"],
+  "cell_header_map": {
+    "评分项": "项目实施方案",
+    "评分标准": "方案完整性",
+    "分值": "10分"
+  }
+}
+-- 大表格处理方式：overview + 每3行一组，首先生成一个表格说明chunk，chunk_type = 表格说明，item_type = table_overview，table_size = large，类似：
+表格说明：评分办法 > 综合评分表
+字段：评分项 > 评分标准 > 分值
+行数：80
+用途：该 chunk 用于说明大表结构，具体数据位于 table_row_group chunk。
+每 3 行打包成一个 chunk
+  {
+    "parent_table_overview_id": "table_001_overview",
+    "row_start": 1,
+    "row_end": 3,
+    "rows": [
+      {
+        "row_index": 1,
+        "cells": [...],
+        "cell_header_map": {...}
+      }
+    ]
+  }
+
+- 列表项 / 业务条款切片： 处理标题、编号、小点、列表。这些会被拆成独立条目，每个条目一个 chunk。metadata 会记录：
+  {
+    "source_format": "markdown_list",
+    "item_type": "列表项",
+    "section": "项目实施要求",
+    "item_name": "项目实施要求",
+    "sequence": "1"
+  }
+- 段落块切片：段落不是每一行都切，而是会先做短段合并：
+- 图片证据 chunk，OCR + AI 描述写成图片证据 chunk
+- 之后每一个chunk会统一补metadata：
+  {
+    "hierarchy_path": "章节路径",
+    "item_type": "切片类型",
+    "parent_table_header": "表格上下文",
+    "importance_score": 1.0,
+    "module": "所属模块",
+    "section_id": "来源章节",
+    "vector_filter": {
+      "module": "...",
+      "item_type": "...",
+      "hierarchy_path": "..."
+    }
+  }
 
 ## Chroma 向量索引
 
@@ -282,7 +363,8 @@ LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
 LLM_TIMEOUT=120
 LLM_MAX_CONCURRENCY=5
 LLM_STREAM_MAX_CONCURRENCY=4
-BID_STRUCTURED_OUTPUT_ENABLED=true
+BID_FAST_MARKDOWN_EXTRACTION=true
+BID_STRUCTURED_OUTPUT_ENABLED=false
 BID_VECTOR_STORE_ENABLED=true
 CHROMA_PERSIST_DIR=.chroma
 CHROMA_COLLECTION=bid_document_chunks
@@ -515,7 +597,7 @@ MINERU_PARALLEL_MAX_WORKERS=3
 1. 第 0 步先生成全局 `project_profile` 和全文 `section_tree`，统一项目名称、编号、预算、招标人、代理机构、采购方式、分包等基础信息，并还原章节标题、层级和起始位置。
 2. 第 1 步并发执行四个专项抽取任务：商务内容、技术要求、资格审查、评分要求。每个专项任务都会携带全局 `project_profile` 和 `section_tree`，并要求模型不得修改项目基本信息，只能从指定候选章节范围内提取。
 3. 资格审查专项会额外走一轮轻量模型预筛：逐章分段标出疑似资格审查、符合性审查、废标/否决投标段落，再把命中片段并入精提取上下文。预筛失败不会中断主流程，会自动回退到规则召回。
-4. 专项抽取默认使用 JSON Schema 结构化输出。每个原子条目都要求带 `source_chunk_id`、`source_text`、`source_heading` 和 `evidence_snippet`，其中 `source_chunk_id` 来自候选片段里的来源标记，`source_text` 用于人工复核和 golden evidence 测试。
+4. 专项抽取默认使用 Markdown 快速输出，减少模型兼容性问题；如果开启 `BID_STRUCTURED_OUTPUT_ENABLED=true`，则使用 JSON Schema 结构化输出，并要求每个原子条目带 `source_chunk_id`、`source_text`、`source_heading` 和 `evidence_snippet`。
 5. Schema 中对关键枚举值做归一化：风险等级为 `高/中/低/未明确`，废标法律性质为 `资格性/符合性/响应性/其他`，审查状态为 `open/resolved/ignored`，评分类型为 `商务评分/技术评分/价格评分/其他`。
 
 每个模块都会先召回相关章节和命中点前后上下文，再交给大模型提取，避免多个模块反复读取整份长文档。召回策略采用“SQLite FTS5 + BM25 关键词召回、章节标题加权、模块语义 query、Chroma 向量召回、reranker 重排”的混合检索；未启用 FTS5 或无命中时，会回退到轻量关键词计分，宁可多召回一些，也尽量避免漏掉不同招标文件里的同义标题。
@@ -523,12 +605,13 @@ MINERU_PARALLEL_MAX_WORKERS=3
 默认上下文参数：
 
 ```env
-BID_STRUCTURED_OUTPUT_ENABLED=true
+BID_FAST_MARKDOWN_EXTRACTION=true
+BID_STRUCTURED_OUTPUT_ENABLED=false
 BID_RETRIEVAL_CONTEXT_CHARS=4500
 BID_RETRIEVAL_MAX_CHARS=52000
 ```
 
-其中 `BID_STRUCTURED_OUTPUT_ENABLED` 控制是否启用 JSON Schema 结构化抽取；如果当前服务商或模型不兼容 JSON Schema，可临时设为 `false` 回到旧 Markdown 抽取。`BID_RETRIEVAL_CONTEXT_CHARS` 控制每个命中点前后的窗口大小，`BID_RETRIEVAL_MAX_CHARS` 控制每个模块最多交给大模型的候选文本长度。
+其中 `BID_FAST_MARKDOWN_EXTRACTION=true` 表示优先使用 Markdown 快速抽取，避免 JSON Schema / Function Calling 兼容性导致四大模块空白。若后续模型稳定且希望强结构化输出，可设置 `BID_FAST_MARKDOWN_EXTRACTION=false` 并开启 `BID_STRUCTURED_OUTPUT_ENABLED=true`。`BID_RETRIEVAL_CONTEXT_CHARS` 控制每个命中点前后的窗口大小，`BID_RETRIEVAL_MAX_CHARS` 控制每个模块最多交给大模型的候选文本长度。
 
 前端可以选择：
 
