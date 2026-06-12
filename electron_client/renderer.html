@@ -213,6 +213,7 @@
             </div>
             <div class="knowledge-actions">
               <button id="generationOutlineBtn" class="ghost-btn" type="button">生成目录</button>
+              <button id="generationSectionGenerateBtn" class="ghost-btn hidden" type="button">生成本章</button>
               <button id="generationOutlineCopyBtn" class="ghost-btn" type="button">复制</button>
               <button id="generationOutlineExportBtn" class="ghost-btn" type="button">导出</button>
             </div>
@@ -253,6 +254,27 @@
                 <section class="generation-outline-panel">
                   <h4>目录草稿</h4>
                   <textarea id="generationOutlineEditor" class="generation-outline-editor" placeholder="点击“生成目录”后，可在这里直接修改标书目录。"></textarea>
+                </section>
+              </div>
+              <div id="generationSectionLayout" class="generation-section-layout hidden">
+                <section class="generation-section-list-panel">
+                  <h4>目录章节</h4>
+                  <div id="generationSectionList" class="generation-section-list">
+                    先生成或粘贴目录，再进入“章节填充”。
+                  </div>
+                </section>
+                <section class="generation-section-editor-panel">
+                  <div class="generation-section-head">
+                    <div>
+                      <h4 id="generationSectionTitle">章节正文</h4>
+                      <p id="generationSectionHint">选择左侧章节后，点击“生成本章”。</p>
+                    </div>
+                    <div class="project-rag-actions">
+                      <button id="generationSectionCopyBtn" class="ghost-btn" type="button">复制本章</button>
+                      <button id="generationDraftExportBtn" class="ghost-btn" type="button">导出初稿</button>
+                    </div>
+                  </div>
+                  <textarea id="generationSectionEditor" class="generation-section-editor" placeholder="选择章节并生成正文后，可在这里修改。"></textarea>
                 </section>
               </div>
             </section>

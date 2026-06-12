@@ -860,6 +860,14 @@ class ConfirmRecordRequest(BaseModel):
     status: str = Field(default="已确认")
 
 
+class BidSectionDraftRequest(BaseModel):
+    section_title: str = Field(min_length=1)
+    outline_markdown: str = Field(default="")
+    llm_vendor: str = Field(default="siliconflow")
+    llm_model: Optional[str] = Field(default=None)
+    enable_deep_thinking: bool = Field(default=False)
+
+
 @app.get("/knowledge/types")
 def get_knowledge_types() -> dict:
     return {
@@ -928,6 +936,35 @@ def get_project_bid_outline(project_id: str) -> dict:
 @app.get("/projects/bid-outline/{project_id}")
 def get_project_bid_outline_alias(project_id: str) -> dict:
     return get_project_bid_outline(project_id)
+
+
+@app.post("/projects/{project_id}/bid-section-draft")
+def create_project_bid_section_draft(project_id: str, request: BidSectionDraftRequest) -> dict:
+    try:
+        from bid_section_writer import generate_bid_section_draft
+
+        llm = None
+        try:
+            llm = _build_llm(
+                llm_vendor=request.llm_vendor,
+                llm_model=request.llm_model,
+                enable_deep_thinking=request.enable_deep_thinking,
+            )
+        except Exception:
+            llm = None
+        return generate_bid_section_draft(
+            project_id=project_id,
+            section_title=request.section_title,
+            outline_markdown=request.outline_markdown,
+            llm=llm,
+        )
+    except Exception as exc:
+        _raise_api_error(exc)
+
+
+@app.post("/projects/bid-section-draft/{project_id}")
+def create_project_bid_section_draft_alias(project_id: str, request: BidSectionDraftRequest) -> dict:
+    return create_project_bid_section_draft(project_id, request)
 
 
 @app.post("/projects/records/{table_name}/{record_id}/confirm")

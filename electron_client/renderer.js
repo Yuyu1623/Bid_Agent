@@ -16,10 +16,19 @@ const bidGenerationWorkspace = document.querySelector("#bidGenerationWorkspace")
 const generationProjectHint = document.querySelector("#generationProjectHint");
 const generationProjectSelect = document.querySelector("#generationProjectSelect");
 const generationOutlineBtn = document.querySelector("#generationOutlineBtn");
+const generationSectionGenerateBtn = document.querySelector("#generationSectionGenerateBtn");
 const generationOutlineCopyBtn = document.querySelector("#generationOutlineCopyBtn");
 const generationOutlineExportBtn = document.querySelector("#generationOutlineExportBtn");
 const generationEvidenceOutput = document.querySelector("#generationEvidenceOutput");
 const generationOutlineEditor = document.querySelector("#generationOutlineEditor");
+const generationSectionLayout = document.querySelector("#generationSectionLayout");
+const generationSectionList = document.querySelector("#generationSectionList");
+const generationSectionTitle = document.querySelector("#generationSectionTitle");
+const generationSectionHint = document.querySelector("#generationSectionHint");
+const generationSectionEditor = document.querySelector("#generationSectionEditor");
+const generationSectionCopyBtn = document.querySelector("#generationSectionCopyBtn");
+const generationDraftExportBtn = document.querySelector("#generationDraftExportBtn");
+const generationStageButtons = document.querySelectorAll("[data-generation-stage]");
 const knowledgeWorkspace = document.querySelector("#knowledgeWorkspace");
 const projectWorkspace = document.querySelector("#projectWorkspace");
 const toolNavButtons = document.querySelectorAll("[data-tool-view]");
@@ -104,6 +113,10 @@ let activeProjectId = null;
 let activeProjectDetail = null;
 let activeProjectTable = "project_profile";
 let lastSavedProjectId = null;
+let activeGenerationStage = "outline";
+let generationSections = [];
+let activeGenerationSectionIndex = -1;
+let generationSectionDrafts = {};
 
 const KNOWLEDGE_STORAGE_KEY = "dowell_bid_knowledge_base_v1";
 
@@ -341,12 +354,23 @@ knowledgeExportBtn?.addEventListener("click", exportKnowledgeBase);
 knowledgeImportBtn?.addEventListener("click", () => knowledgeImportFile?.click());
 knowledgeImportFile?.addEventListener("change", importKnowledgeBase);
 generationOutlineBtn?.addEventListener("click", generateWorkbenchBidOutline);
+generationSectionGenerateBtn?.addEventListener("click", generateActiveBidSectionDraft);
 generationOutlineCopyBtn?.addEventListener("click", async () => {
-  await navigator.clipboard.writeText(getGenerationOutlineText());
+  await navigator.clipboard.writeText(getGenerationCopyText());
   flashButton(generationOutlineCopyBtn, "已复制");
 });
 generationOutlineExportBtn?.addEventListener("click", () => {
-  exportText("标书目录建议.md", getGenerationOutlineText());
+  exportText(activeGenerationStage === "assemble" ? "标书初稿.md" : "标书目录建议.md", getGenerationCopyText());
+});
+generationSectionCopyBtn?.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(generationSectionEditor?.value || "");
+  flashButton(generationSectionCopyBtn, "已复制");
+});
+generationDraftExportBtn?.addEventListener("click", () => {
+  exportText("标书初稿.md", assembleGenerationDraft());
+});
+generationStageButtons.forEach((button) => {
+  button.addEventListener("click", () => setGenerationStage(button.dataset.generationStage || "outline"));
 });
 projectRefreshBtn?.addEventListener("click", () => loadProjectsFromBackend());
 projectDeleteBtn?.addEventListener("click", deleteActiveProject);
