@@ -1323,6 +1323,10 @@ function renderGenerationOutlineDraft(markdown) {
     generationOutlineEditor.value = parts.outline || "";
     generationOutlineEditor.dataset.rawText = parts.outline || "";
   }
+  generationSectionDrafts = {};
+  generationSections = parseGenerationOutlineSections(parts.outline || "");
+  activeGenerationSectionIndex = generationSections.length ? 0 : -1;
+  renderGenerationSectionList();
 }
 
 function splitOutlineEvidence(markdown) {
@@ -1353,6 +1357,230 @@ function splitOutlineEvidence(markdown) {
 
 function getGenerationOutlineText() {
   return generationOutlineEditor?.value || generationOutlineEditor?.dataset.rawText || "";
+}
+
+function getGenerationCopyText() {
+  if (activeGenerationStage === "sections") {
+    return generationSectionEditor?.value || "";
+  }
+  if (activeGenerationStage === "assemble") {
+    return assembleGenerationDraft();
+  }
+  return getGenerationOutlineText();
+}
+
+function setGenerationStage(stage) {
+  activeGenerationStage = stage || "outline";
+  generationStageButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.generationStage === activeGenerationStage);
+  });
+  const showOutline = activeGenerationStage === "outline";
+  const showSections = activeGenerationStage === "sections" || activeGenerationStage === "assemble";
+  document.querySelector(".generation-outline-layout")?.classList.toggle("hidden", !showOutline);
+  generationSectionLayout?.classList.toggle("hidden", !showSections);
+  generationOutlineBtn?.classList.toggle("hidden", !showOutline);
+  generationSectionGenerateBtn?.classList.toggle("hidden", activeGenerationStage !== "sections");
+
+  if (activeGenerationStage === "sections") {
+    refreshGenerationSections();
+    generationProjectHint.textContent = "选择章节后点击“生成本章”，正文会保留在右侧，可继续修改。";
+  } else if (activeGenerationStage === "assemble") {
+    refreshGenerationSections();
+    if (generationSectionEditor) {
+      generationSectionEditor.value = assembleGenerationDraft();
+    }
+    if (generationSectionTitle) {
+      generationSectionTitle.textContent = "标书初稿汇总";
+    }
+    if (generationSectionHint) {
+      generationSectionHint.textContent = "这里汇总所有已生成章节，可直接导出 Markdown 初稿。";
+    }
+    generationProjectHint.textContent = "已进入汇总导出，可复制或导出当前初稿。";
+  } else {
+    generationProjectHint.textContent = (generationProjectSelect?.value || lastSavedProjectId || activeProjectId)
+      ? "已选择项目，可直接生成标书目录。"
+      : "完成招标解析后，将自动带入当前项目。";
+  }
+}
+
+function refreshGenerationSections() {
+  generationSections = parseGenerationOutlineSections(getGenerationOutlineText());
+  if (activeGenerationSectionIndex < 0 && generationSections.length) {
+    activeGenerationSectionIndex = 0;
+  }
+  if (activeGenerationSectionIndex >= generationSections.length) {
+    activeGenerationSectionIndex = generationSections.length - 1;
+  }
+  renderGenerationSectionList();
+  if (activeGenerationStage === "sections") {
+    loadActiveGenerationSection();
+  }
+}
+
+function parseGenerationOutlineSections(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const sections = [];
+  const seen = new Set();
+  lines.forEach((line) => {
+    const text = line.trim();
+    if (!text) {
+      return;
+    }
+    const heading = text.match(/^#{2,4}\s+(.+)$/);
+    const numbered = text.match(/^(?:\d+[.、]|[一二三四五六七八九十]+[、.])\s*(.+)$/);
+    const title = (heading?.[1] || numbered?.[1] || "").trim();
+    if (!title || /^生成依据|招标文件中的编制|投标文件总目录$/.test(title)) {
+      return;
+    }
+    const normalized = title.replace(/\s+/g, "");
+    if (normalized.length < 3 || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    sections.push({
+      title,
+      sourceLine: text
+    });
+  });
+  return sections.slice(0, 80);
+}
+
+function renderGenerationSectionList() {
+  if (!generationSectionList) {
+    return;
+  }
+  if (!generationSections.length) {
+    generationSectionList.innerHTML = `<div class="project-rag-empty">先在“目录生成”中生成或粘贴目录，再进入章节填充。</div>`;
+    return;
+  }
+  generationSectionList.innerHTML = generationSections.map((section, index) => {
+    const hasDraft = Boolean(generationSectionDrafts[section.title]);
+    return `
+      <button class="generation-section-item ${index === activeGenerationSectionIndex ? "active" : ""}" type="button" data-section-index="${index}">
+        <strong>${escapeHtml(section.title)}</strong>
+        <span>${hasDraft ? "已生成，可继续编辑" : "未生成"}</span>
+      </button>
+    `;
+  }).join("");
+  generationSectionList.querySelectorAll("[data-section-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      saveActiveGenerationSectionDraft();
+      activeGenerationSectionIndex = Number(button.dataset.sectionIndex || 0);
+      renderGenerationSectionList();
+      loadActiveGenerationSection();
+    });
+  });
+}
+
+function loadActiveGenerationSection() {
+  const section = generationSections[activeGenerationSectionIndex];
+  if (!section) {
+    if (generationSectionTitle) {
+      generationSectionTitle.textContent = "章节正文";
+    }
+    if (generationSectionHint) {
+      generationSectionHint.textContent = "暂无可填充章节。";
+    }
+    if (generationSectionEditor) {
+      generationSectionEditor.value = "";
+    }
+    return;
+  }
+  if (generationSectionTitle) {
+    generationSectionTitle.textContent = section.title;
+  }
+  if (generationSectionHint) {
+    generationSectionHint.textContent = generationSectionDrafts[section.title]
+      ? "已载入本章草稿，可继续修改或重新生成。"
+      : "点击“生成本章”创建正文草稿。";
+  }
+  if (generationSectionEditor) {
+    generationSectionEditor.value = generationSectionDrafts[section.title] || "";
+  }
+}
+
+function saveActiveGenerationSectionDraft() {
+  const section = generationSections[activeGenerationSectionIndex];
+  if (!section || !generationSectionEditor) {
+    return;
+  }
+  const value = generationSectionEditor.value.trim();
+  if (value) {
+    generationSectionDrafts[section.title] = value;
+  }
+}
+
+async function generateActiveBidSectionDraft() {
+  refreshGenerationSections();
+  const section = generationSections[activeGenerationSectionIndex];
+  const selectedProjectId = generationProjectSelect?.value || lastSavedProjectId || activeProjectId;
+  if (!selectedProjectId) {
+    generationProjectHint.textContent = "请先选择项目。";
+    return;
+  }
+  if (!section) {
+    generationProjectHint.textContent = "请先生成或粘贴目录。";
+    return;
+  }
+  const apiBase = getApiBase();
+  generationSectionGenerateBtn.disabled = true;
+  if (generationSectionHint) {
+    generationSectionHint.textContent = "正在生成本章正文...";
+  }
+  try {
+    await ensureBackendReady(apiBase);
+    const response = await fetch(`${apiBase}/projects/${encodeURIComponent(selectedProjectId)}/bid-section-draft`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        section_title: section.title,
+        outline_markdown: getGenerationOutlineText(),
+        llm_vendor: document.querySelector("#llmVendor")?.value || "siliconflow",
+        llm_model: llmModel?.value || "",
+        enable_deep_thinking: Boolean(enableDeepThinking?.checked)
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+    }
+    const markdown = data.draft_markdown || "";
+    generationSectionDrafts[section.title] = markdown;
+    if (generationSectionEditor) {
+      generationSectionEditor.value = markdown;
+    }
+    if (generationSectionHint) {
+      generationSectionHint.textContent = data.used_llm
+        ? "本章正文已由大模型生成，可继续修改。"
+        : "大模型不可用，已使用本地模板生成本章草稿。";
+    }
+    renderGenerationSectionList();
+  } catch (error) {
+    if (generationSectionHint) {
+      generationSectionHint.textContent = `章节生成失败：${error.message}`;
+    }
+  } finally {
+    generationSectionGenerateBtn.disabled = false;
+  }
+}
+
+function assembleGenerationDraft() {
+  saveActiveGenerationSectionDraft();
+  const outline = getGenerationOutlineText().trim();
+  const lines = ["# 标书初稿", ""];
+  if (outline) {
+    lines.push("## 目录", "", outline, "");
+  }
+  generationSections.forEach((section) => {
+    const draft = generationSectionDrafts[section.title];
+    if (draft) {
+      lines.push(draft.trim(), "");
+    }
+  });
+  if (!Object.keys(generationSectionDrafts).length) {
+    lines.push("尚未生成章节正文。");
+  }
+  return lines.join("\n").trim() + "\n";
 }
 
 function syncGenerationProjectSelect() {
