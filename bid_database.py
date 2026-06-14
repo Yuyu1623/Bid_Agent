@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from extraction_cleaner import clean_analysis_dict, is_duplicate_text
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "dowell_bid_agent.db"
+DB_PATH = Path(__file__).resolve().parent / "data" / "bid_agent.db"
 
 
 KNOWLEDGE_TYPES = {

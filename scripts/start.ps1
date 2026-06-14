@@ -12,9 +12,9 @@ $BackendErrLog = Join-Path $LogDir "backend.err.log"
 $VenvDir = Join-Path $Root ".venv"
 $PythonExe = Join-Path $VenvDir "Scripts\python.exe"
 $RequirementsFile = Join-Path $Root "requirements.txt"
-$RequirementsMarker = Join-Path $VenvDir ".dowell_requirements_installed"
+$RequirementsMarker = Join-Path $VenvDir ".requirements_installed"
 $ElectronDir = Join-Path $Root "electron_client"
-$NpmMarker = Join-Path $ElectronDir "node_modules\.dowell_npm_installed"
+$NpmMarker = Join-Path $ElectronDir "node_modules\.npm_installed"
 
 if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir | Out-Null

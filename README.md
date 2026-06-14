@@ -15,7 +15,7 @@ run.bat
 也可以双击：
 
 ```text
-start_.bat
+start.bat
 ```
 
 启动脚本会自动完成以下事情：
@@ -405,7 +405,7 @@ SERPAPI_API_KEY=your-serpapi-key
 推荐双击项目根目录下的：
 
 ```text
-start_.bat
+start.bat
 ```
 
 一键启动会自动完成：
@@ -648,7 +648,7 @@ BID_RETRIEVAL_MAX_CHARS=52000
 SQLite 数据库默认位置：
 
 ```text
-data/_bid_agent.db
+data/bid_agent.db
 ```
 
 该文件属于本地业务数据，已加入 `.gitignore`，不要上传到 GitHub。

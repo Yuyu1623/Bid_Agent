@@ -5,7 +5,7 @@ if not exist "%~dp0logs" mkdir "%~dp0logs"
 
 echo.
 echo ========================================
-echo Dowell Bid Tool Launcher
+echo Bid Tool Launcher
 echo ========================================
 echo Project dir: %~dp0
 echo Startup log: %~dp0logs\startup.log
@@ -20,7 +20,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_dowell.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
 set EXIT_CODE=%ERRORLEVEL%
 
 echo.
@@ -28,7 +28,7 @@ if not "%EXIT_CODE%"=="0" (
     echo Startup failed. Exit code: %EXIT_CODE%
     echo Please check logs\startup.log, logs\backend.out.log and logs\backend.err.log.
 ) else (
-    echo Dowell Bid Tool exited.
+    echo Bid Tool exited.
 )
 echo.
 pause
